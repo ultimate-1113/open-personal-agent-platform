@@ -32,6 +32,20 @@ type CreateMemoryInput = {
   value: string;
 };
 
+type UpdateTaskInput = {
+  principalId: string;
+  idempotencyKey: string;
+  taskId: string;
+  title: string;
+  status: "pending" | "in-progress" | "completed";
+};
+
+type DeleteResourceInput = {
+  principalId: string;
+  idempotencyKey: string;
+  resourceId: string;
+};
+
 type AppendExchangeInput = {
   principalId: string;
   idempotencyKey: string;
@@ -66,6 +80,25 @@ const isCreateMemoryInput = (value: unknown): value is CreateMemoryInput => {
     typeof input["idempotencyKey"] === "string" &&
     typeof input["key"] === "string" && input["key"].length > 0 && input["key"].length <= 200 &&
     typeof input["value"] === "string" && input["value"].length <= 32_768;
+};
+
+const isUpdateTaskInput = (value: unknown): value is UpdateTaskInput => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  return typeof input["principalId"] === "string" &&
+    typeof input["idempotencyKey"] === "string" &&
+    typeof input["taskId"] === "string" && /^task:[0-9a-f-]{36}$/u.test(input["taskId"]) &&
+    typeof input["title"] === "string" && input["title"].length > 0 && input["title"].length <= 500 &&
+    (input["status"] === "pending" || input["status"] === "in-progress" ||
+      input["status"] === "completed");
+};
+
+const isDeleteResourceInput = (value: unknown): value is DeleteResourceInput => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  return typeof input["principalId"] === "string" &&
+    typeof input["idempotencyKey"] === "string" &&
+    typeof input["resourceId"] === "string";
 };
 
 const isAppendExchangeInput = (value: unknown): value is AppendExchangeInput => {
@@ -162,11 +195,29 @@ export class ConversationAgent {
         ? this.#createTask(value)
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
+    if (request.method === "PATCH" && path.startsWith("/tasks/")) {
+      const value: unknown = await request.json().catch(() => null);
+      return isUpdateTaskInput(value)
+        ? this.#updateTask(value)
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    if (request.method === "DELETE" && path.startsWith("/tasks/")) {
+      const value: unknown = await request.json().catch(() => null);
+      return isDeleteResourceInput(value)
+        ? this.#deleteTask(value)
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
     if (request.method === "GET" && path === "/memories") return this.#memories();
     if (request.method === "POST" && path === "/memories") {
       const value: unknown = await request.json().catch(() => null);
       return isCreateMemoryInput(value)
         ? this.#upsertMemory(value)
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    if (request.method === "DELETE" && path.startsWith("/memories/")) {
+      const value: unknown = await request.json().catch(() => null);
+      return isDeleteResourceInput(value)
+        ? this.#deleteMemory(value)
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
     return new Response("Not Found", { status: 404 });
@@ -256,7 +307,9 @@ export class ConversationAgent {
     }>(
       `SELECT message_id, role, content, information_policy_json,
               observation_ids_json, created_at
-       FROM messages ORDER BY created_at, message_id LIMIT 100`,
+       FROM messages
+       WHERE rowid IN (SELECT rowid FROM messages ORDER BY rowid DESC LIMIT 100)
+       ORDER BY rowid`,
     )].map((message) => ({
       messageId: message.message_id,
       role: message.role,
@@ -369,6 +422,49 @@ export class ConversationAgent {
     return Response.json({ tasks });
   }
 
+  #updateTask(input: UpdateTaskInput): Response {
+    const key = `task-update:${input.idempotencyKey}`;
+    const replay = this.#replay(key);
+    if (replay) return Response.json(replay);
+    const existing = firstRow(this.#sql.exec<{ created_at: string }>(
+      `SELECT created_at FROM tasks WHERE task_id = ?`, input.taskId,
+    ));
+    if (!existing) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
+    const now = new Date().toISOString();
+    this.#sql.exec(
+      `UPDATE tasks SET title = ?, status = ?, updated_at = ? WHERE task_id = ?`,
+      input.title, input.status, now, input.taskId,
+    );
+    const task = {
+      taskId: input.taskId,
+      title: input.title,
+      status: input.status,
+      callCounts: {},
+      createdAt: existing.created_at,
+      updatedAt: now,
+    };
+    this.#recordWrite(key, task, {
+      eventType: "task.updated", outcome: "success",
+      principalId: input.principalId, taskId: input.taskId,
+    }, now);
+    return Response.json(task);
+  }
+
+  #deleteTask(input: DeleteResourceInput): Response {
+    const key = `task-delete:${input.idempotencyKey}`;
+    const replay = this.#replay(key);
+    if (replay) return Response.json(replay);
+    const deleted = this.#sql.exec(`DELETE FROM tasks WHERE task_id = ?`, input.resourceId);
+    if (deleted.rowsWritten !== 1) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
+    const now = new Date().toISOString();
+    const response = { taskId: input.resourceId, deleted: true };
+    this.#recordWrite(key, response, {
+      eventType: "task.deleted", outcome: "success",
+      principalId: input.principalId, taskId: input.resourceId,
+    }, now);
+    return Response.json(response);
+  }
+
   #upsertMemory(input: CreateMemoryInput): Response {
     const replay = this.#replay(`memory:${input.idempotencyKey}`);
     if (replay) return Response.json(replay);
@@ -429,6 +525,23 @@ export class ConversationAgent {
       updatedAt: memory.updated_at,
     }));
     return Response.json({ memories });
+  }
+
+  #deleteMemory(input: DeleteResourceInput): Response {
+    const key = `memory-delete:${input.idempotencyKey}`;
+    const replay = this.#replay(key);
+    if (replay) return Response.json(replay);
+    const deleted = this.#sql.exec(
+      `DELETE FROM structured_memory WHERE memory_key = ?`, input.resourceId,
+    );
+    if (deleted.rowsWritten !== 1) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
+    const now = new Date().toISOString();
+    const response = { key: input.resourceId, deleted: true };
+    this.#recordWrite(key, response, {
+      eventType: "memory.deleted", outcome: "success",
+      principalId: input.principalId, memoryKey: input.resourceId,
+    }, now);
+    return Response.json(response);
   }
 
   #replay(idempotencyKey: string): Readonly<Record<string, unknown>> | undefined {

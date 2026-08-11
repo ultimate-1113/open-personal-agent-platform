@@ -1204,6 +1204,103 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     });
   }
 
+  const mutateConversationResource = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
+    resource: "task-update" | "task-delete" | "memory-delete",
+    internalPath: string,
+    method: "PATCH" | "DELETE",
+    body: Record<string, JsonValue>,
+  ): Promise<Response> => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const conversationId = body["conversationId"];
+    if (typeof conversationId !== "string" || !/^conversation:[a-f0-9]{64}$/u.test(conversationId)) {
+      return problem(context.req.raw, 400, "CONVERSATION_ID_REQUIRED");
+    }
+    const principalId = context.get("ownerPrincipalId");
+    const reservation = await reserveOwnerOperation({
+      bindings: context.env,
+      principalId,
+      idempotencyKey: `${resource}:${idempotencyKey}`,
+      now: dependencies.now?.() ?? new Date(),
+    });
+    if (reservation === "limit") return problem(context.req.raw, 403, "BUDGET_HARD_LIMIT_REACHED");
+    if (reservation === "conflict") return problem(context.req.raw, 409, "IDEMPOTENCY_CONFLICT");
+    if (reservation === "unavailable") return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+    const stub = context.env.CONVERSATIONS.get(
+      context.env.CONVERSATIONS.idFromName(conversationId),
+    );
+    let response: Response;
+    try {
+      response = await stub.fetch(`https://conversation.internal${internalPath}`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, principalId, idempotencyKey }),
+      });
+    } catch {
+      await releaseReservation(reservation, context.env.DEPLOYMENT_ID);
+      return problem(context.req.raw, 503, "CONVERSATION_UNAVAILABLE");
+    }
+    if (!response.ok) {
+      await releaseReservation(reservation, context.env.DEPLOYMENT_ID);
+      return new Response(response.body, response);
+    }
+    if (!await settleOwnerOperation(reservation, context.env.DEPLOYMENT_ID)) {
+      return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+    }
+    return new Response(response.body, response);
+  };
+
+  app.patch("/v1/tasks/:taskId", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const body = value as Record<string, unknown>;
+    if (typeof body["conversationId"] !== "string" ||
+      typeof body["title"] !== "string" || body["title"].length === 0 ||
+      body["title"].length > 500 ||
+      (body["status"] !== "pending" && body["status"] !== "in-progress" &&
+        body["status"] !== "completed")) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const taskId = context.req.param("taskId");
+    if (!/^task:[0-9a-f-]{36}$/u.test(taskId)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    return mutateConversationResource(context, "task-update", `/tasks/${encodeURIComponent(taskId)}`,
+      "PATCH", {
+        conversationId: body["conversationId"], taskId,
+        title: body["title"], status: body["status"],
+      });
+  });
+
+  app.delete("/v1/tasks/:taskId", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    const conversationId = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["conversationId"] : undefined;
+    const taskId = context.req.param("taskId");
+    if (!/^task:[0-9a-f-]{36}$/u.test(taskId) || typeof conversationId !== "string") {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    return mutateConversationResource(context, "task-delete", `/tasks/${encodeURIComponent(taskId)}`,
+      "DELETE", { conversationId, resourceId: taskId });
+  });
+
+  app.delete("/v1/memories/:memoryKey", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    const conversationId = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["conversationId"] : undefined;
+    const memoryKey = context.req.param("memoryKey");
+    if (memoryKey.length === 0 || memoryKey.length > 200 || typeof conversationId !== "string") {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    return mutateConversationResource(context, "memory-delete",
+      `/memories/${encodeURIComponent(memoryKey)}`, "DELETE", {
+        conversationId, resourceId: memoryKey,
+      });
+  });
+
   app.get("/v1/approvals", async (context) => {
     const url = new URL("https://control.internal/internal/v1/approvals");
     url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);

@@ -64,7 +64,9 @@ export function App() {
   const [data, setData] = useState<ApiRecord>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingItem, setEditingItem] = useState<ApiRecord>();
   const loadSequence = useRef(0);
+  const conversationList = useRef<HTMLElement>(null);
   const request = useCallback(
     (path: string, init?: RequestInit) =>
       api(path, (status) => t("errors.requestFailed", { status }), init),
@@ -111,6 +113,16 @@ export function App() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (tab !== "conversation") return;
+    const element = conversationList.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [data, tab]);
+
+  useEffect(() => {
+    setEditingItem(undefined);
+  }, [tab]);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -245,6 +257,65 @@ export function App() {
     }
   };
 
+  const saveEdit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingItem || !conversationId) return;
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError("");
+    try {
+      if (tab === "tasks") {
+        const taskId = display(editingItem["taskId"]);
+        await request(`/v1/tasks/${encodeURIComponent(taskId)}`, {
+          method: "PATCH",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({
+            conversationId,
+            title: formText(form, "title"),
+            status: formText(form, "status"),
+          }),
+        });
+      } else if (tab === "memory") {
+        await request("/v1/memories", {
+          method: "POST",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({
+            conversationId,
+            key: display(editingItem["key"]),
+            value: formText(form, "value"),
+          }),
+        });
+      }
+      setEditingItem(undefined);
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteItem = async (item: ApiRecord) => {
+    if (!conversationId || !window.confirm(t("items.deleteConfirm"))) return;
+    const isTask = tab === "tasks";
+    const id = display(isTask ? item["taskId"] : item["key"]);
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/${isTask ? "tasks" : "memories"}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ conversationId }),
+      });
+      if (editingItem === item) setEditingItem(undefined);
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
 
   const collection = tab === "tasks"
     ? rows(data["tasks"])
@@ -335,10 +406,17 @@ export function App() {
           <textarea
             name="content"
             required
+            disabled={busy}
             aria-label={t("conversation.messageLabel")}
             placeholder={t("conversation.placeholder")}
             maxLength={32768}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              if (!busy) event.currentTarget.form?.requestSubmit();
+            }}
           />
+          <small className="composer-hint">{t("conversation.keyboardHint")}</small>
           <button disabled={busy}>
             {conversationId ? t("conversation.send") : t("conversation.create")}
           </button>
@@ -363,6 +441,29 @@ export function App() {
           <textarea name="value" maxLength={32768} placeholder={t("memory.valuePlaceholder")} />
           <button disabled={busy || !conversationId}>{t("memory.save")}</button>
         </form>}
+      {(tab === "tasks" || tab === "memory") && editingItem &&
+        <form onSubmit={(event) => { void saveEdit(event); }} className="memory-form edit-form">
+          <strong>{t(tab === "tasks" ? "tasks.editTitle" : "memory.editTitle")}</strong>
+          {tab === "tasks"
+            ? <>
+                <input name="title" required maxLength={500} defaultValue={display(editingItem["title"])} />
+                <select name="status" defaultValue={display(editingItem["status"], "pending")}>
+                  <option value="pending">{t("tasks.statusPending")}</option>
+                  <option value="in-progress">{t("tasks.statusInProgress")}</option>
+                  <option value="completed">{t("tasks.statusCompleted")}</option>
+                </select>
+              </>
+            : <>
+                <label>{t("memory.keyLabel")}<input value={display(editingItem["key"])} disabled /></label>
+                <textarea name="value" maxLength={32768} defaultValue={display(editingItem["value"])} />
+              </>}
+          <div className="actions">
+            <button disabled={busy}>{t("items.save")}</button>
+            <button type="button" className="quiet" disabled={busy} onClick={() => setEditingItem(undefined)}>
+              {t("items.cancel")}
+            </button>
+          </div>
+        </form>}
       {tab === "budget"
         ? <>
             <form onSubmit={(event) => { void submit(event); }} className="memory-form budget-form">
@@ -377,7 +478,11 @@ export function App() {
           </>
         : tab === "providers"
           ? null
-          : <section className="cards" aria-live="polite">
+          : <section
+              className={`cards${tab === "conversation" ? " conversation-list" : ""}`}
+              aria-live="polite"
+              ref={tab === "conversation" ? conversationList : undefined}
+            >
               {collection.length === 0
                 ? <div className="empty">
                     <strong>{t("empty.title")}</strong>
@@ -417,6 +522,13 @@ export function App() {
                           </button>
                           <button className="danger" disabled={busy} onClick={() => void decide(String(item["approvalId"]), "rejected")}>
                             {t("approvals.reject")}
+                          </button>
+                        </div>}
+                      {(tab === "tasks" || tab === "memory") &&
+                        <div className="actions">
+                          <button disabled={busy} onClick={() => setEditingItem(item)}>{t("items.edit")}</button>
+                          <button className="danger" disabled={busy} onClick={() => void deleteItem(item)}>
+                            {t("items.delete")}
                           </button>
                         </div>}
                       {tab === "connections" && item["status"] === "active" &&
