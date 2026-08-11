@@ -344,6 +344,19 @@ export const resolveGitHubToolContext = (
   };
 };
 
+export const conversationRepositoryContextAnswer = (
+  content: string,
+  history: readonly ConversationContextMessage[],
+): string | undefined => {
+  if (!/(?:今|この)\s*(?:会話|チャット)|話している|話してる/iu.test(content) ||
+    !/(?:repository|リポジトリ)/iu.test(content)) return undefined;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const repository = repositoryMention(history[index]?.content ?? "");
+    if (repository) return `現在の会話では ${repository} について話しています。`;
+  }
+  return "現在の会話履歴からRepositoryを特定できません。owner/name形式で指定してください。";
+};
+
 const GOOGLE_TOOL_NAMES = new Set([
   "google_gmail_search",
   "google_calendar_list_events",
@@ -1448,6 +1461,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       ? normalConversationContext(await stateResponse.json().catch(() => ({})))
       : [];
     const intentPrompt = continuationIntentPrompt(content, conversationHistory);
+    const localContextResponse = conversationRepositoryContextAnswer(content, conversationHistory);
 
     let activeProviderId: "provider:mock-local" | "provider:workers-ai";
     let router: ModelRouter;
@@ -1492,7 +1506,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       ...(googleConnections.length > 0 ? googleAgentTools(googleConnections) : []),
       ...(githubConnections.length > 0 ? githubAgentTools(githubConnections) : []),
     ];
-    const intendedToolNames = selectConnectorToolNames(intentPrompt);
+    const intendedToolNames = localContextResponse ? [] : selectConnectorToolNames(intentPrompt);
     const tools = availableTools.filter((tool) => intendedToolNames.includes(tool.name));
     const needsGoogle = intendedToolNames.some((name) => GOOGLE_TOOL_NAMES.has(name));
     const needsGitHub = intendedToolNames.some((name) => GITHUB_TOOL_NAMES.has(name));
@@ -1560,7 +1574,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (reservation === "conflict") return problem(context.req.raw, 409, "IDEMPOTENCY_CONFLICT");
     if (reservation === "unavailable") return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
     let aiReservation: AiReservation | undefined;
-    if (activeProviderId === "provider:workers-ai" && !unavailableConnectorMessage && !deterministicToolCall) {
+    if (activeProviderId === "provider:workers-ai" && !localContextResponse &&
+      !unavailableConnectorMessage && !deterministicToolCall) {
       let policy: CloudCostPolicy;
       try {
         policy = await costPolicies(context.env).get();
@@ -1592,7 +1607,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     }
     let generated: ModelResponse;
     try {
-      generated = unavailableConnectorMessage
+      generated = localContextResponse
+        ? { providerId: "provider:local-format", text: localContextResponse }
+        : unavailableConnectorMessage
         ? { providerId: "provider:local-format", text: unavailableConnectorMessage }
         : deterministicToolCall
           ? { providerId: "provider:intent-router", text: "", toolCalls: [deterministicToolCall] }

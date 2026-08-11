@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   connectorSummaryMessages,
+  conversationRepositoryContextAnswer,
   continuationIntentPrompt,
   formatConnectorResult,
   githubRepositoryFullNames,
@@ -73,6 +74,12 @@ describe("assistant connector output", () => {
       issueNumber: 1,
       body: "test",
     } });
+  });
+
+  it("answers a repository context question from conversation history without a Connector", () => {
+    expect(conversationRepositoryContextAnswer("今会話でどこのリポジトリの話してるか分かる？", [
+      { role: "user", content: "ultimate-1113/open-personal-agent-platformにissueある？" },
+    ])).toBe("現在の会話では ultimate-1113/open-personal-agent-platform について話しています。");
   });
 
   it("limits a Japanese next-year Calendar request to exactly one year", () => {
