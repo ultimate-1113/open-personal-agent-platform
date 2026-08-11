@@ -152,7 +152,11 @@ export function App() {
         await request("/v1/tasks", {
           method: "POST",
           headers: { "Idempotency-Key": crypto.randomUUID() },
-          body: JSON.stringify({ conversationId, title: formText(form, "title") }),
+          body: JSON.stringify({
+            conversationId,
+            title: formText(form, "title"),
+            description: formText(form, "description"),
+          }),
         });
       } else if (tab === "memory") {
         await request("/v1/memories", {
@@ -272,6 +276,7 @@ export function App() {
           body: JSON.stringify({
             conversationId,
             title: formText(form, "title"),
+            description: formText(form, "description"),
             status: formText(form, "status"),
           }),
         });
@@ -431,8 +436,9 @@ export function App() {
           </button>
         </section>}
       {tab === "tasks" &&
-        <form onSubmit={(event) => { void submit(event); }} className="inline-form">
+        <form onSubmit={(event) => { void submit(event); }} className="memory-form">
           <input name="title" required maxLength={500} placeholder={t("tasks.placeholder")} />
+          <textarea name="description" required maxLength={32768} placeholder={t("tasks.descriptionPlaceholder")} />
           <button disabled={busy || !conversationId}>{t("tasks.add")}</button>
         </form>}
       {tab === "memory" &&
@@ -447,6 +453,8 @@ export function App() {
           {tab === "tasks"
             ? <>
                 <input name="title" required maxLength={500} defaultValue={display(editingItem["title"])} />
+                <textarea name="description" required maxLength={32768}
+                  defaultValue={display(editingItem["description"])} />
                 <select name="status" defaultValue={display(editingItem["status"], "pending")}>
                   <option value="pending">{t("tasks.statusPending")}</option>
                   <option value="in-progress">{t("tasks.statusInProgress")}</option>
@@ -503,7 +511,13 @@ export function App() {
                                 t("connections.unknownAccount"),
                               )}</p>
                             </>
-                          : <>
+                          : tab === "tasks"
+                            ? <>
+                                <strong>{display(item["title"], t("item.fallback"))}</strong>
+                                <p>{display(item["description"], t("tasks.noDescription"))}</p>
+                                <small>{t("tasks.statusLabel")}: {display(item["status"])}</small>
+                              </>
+                            : <>
                               <strong>{display(
                                 item["title"] ?? item["key"] ?? item["eventType"] ??
                                   item["capabilityId"] ?? item["role"],
@@ -513,7 +527,7 @@ export function App() {
                               {tab === "approvals" && typeof item["preview"] === "object" &&
                                 item["preview"] !== null &&
                                 <pre className="policy">{JSON.stringify(item["preview"], null, 2)}</pre>}
-                            </>}
+                              </>}
                       </div>
                       {tab === "approvals" && item["status"] === "pending" &&
                         <div className="actions">

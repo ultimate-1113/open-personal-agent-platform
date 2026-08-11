@@ -89,6 +89,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .conversation-list { max-height: min(62vh, 720px); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; scrollbar-gutter: stable; }
 .cards article, .empty { display: flex; justify-content: space-between; gap: 16px; padding: 17px 19px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .cards p { margin: 5px 0 0; color: var(--text-muted); white-space: pre-wrap; }
+.cards small { display: block; margin-top: 8px; color: var(--text-subtle); }
 .empty { display: grid; color: var(--text-muted); }
 .empty span { color: var(--text-subtle); font-size: 13px; }
 .actions { display: flex; gap: 7px; align-items: center; }

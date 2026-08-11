@@ -23,6 +23,7 @@ type CreateTaskInput = {
   principalId: string;
   idempotencyKey: string;
   title: string;
+  description: string;
 };
 
 type CreateMemoryInput = {
@@ -37,6 +38,7 @@ type UpdateTaskInput = {
   idempotencyKey: string;
   taskId: string;
   title: string;
+  description: string;
   status: "pending" | "in-progress" | "completed";
 };
 
@@ -70,7 +72,9 @@ const isCreateTaskInput = (value: unknown): value is CreateTaskInput => {
   return typeof input["principalId"] === "string" &&
     typeof input["idempotencyKey"] === "string" &&
     typeof input["title"] === "string" &&
-    input["title"].length > 0 && input["title"].length <= 500;
+    input["title"].length > 0 && input["title"].length <= 500 &&
+    typeof input["description"] === "string" && input["description"].length > 0 &&
+    input["description"].length <= 32_768;
 };
 
 const isCreateMemoryInput = (value: unknown): value is CreateMemoryInput => {
@@ -89,6 +93,8 @@ const isUpdateTaskInput = (value: unknown): value is UpdateTaskInput => {
     typeof input["idempotencyKey"] === "string" &&
     typeof input["taskId"] === "string" && /^task:[0-9a-f-]{36}$/u.test(input["taskId"]) &&
     typeof input["title"] === "string" && input["title"].length > 0 && input["title"].length <= 500 &&
+    typeof input["description"] === "string" && input["description"].length > 0 &&
+    input["description"].length <= 32_768 &&
     (input["status"] === "pending" || input["status"] === "in-progress" ||
       input["status"] === "completed");
 };
@@ -138,6 +144,7 @@ export class ConversationAgent {
       CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL,
         call_counts_json TEXT NOT NULL,
         policy_snapshot_json TEXT NOT NULL,
@@ -160,6 +167,10 @@ export class ConversationAgent {
         last_attempt_at TEXT
       );
     `);
+    const taskColumns = [...this.#sql.exec<{ name: string }>("PRAGMA table_info(tasks)")];
+    if (!taskColumns.some((column) => column.name === "description")) {
+      this.#sql.exec("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -334,6 +345,7 @@ export class ConversationAgent {
     const task = {
       taskId: `task:${crypto.randomUUID()}`,
       title: input.title,
+      description: input.description,
       status: "pending",
       callCounts: {},
       createdAt: now,
@@ -341,10 +353,11 @@ export class ConversationAgent {
     };
     this.#sql.exec(
       `INSERT INTO tasks
-       (task_id, title, status, call_counts_json, policy_snapshot_json, created_at, updated_at)
-       VALUES (?, ?, 'pending', '{}', '{}', ?, ?)`,
+       (task_id, title, description, status, call_counts_json, policy_snapshot_json, created_at, updated_at)
+       VALUES (?, ?, ?, 'pending', '{}', '{}', ?, ?)`,
       task.taskId,
       task.title,
+      task.description,
       now,
       now,
     );
@@ -404,16 +417,18 @@ export class ConversationAgent {
     const tasks = [...this.#sql.exec<{
       task_id: string;
       title: string;
+      description: string;
       status: string;
       call_counts_json: string;
       created_at: string;
       updated_at: string;
     }>(
-      `SELECT task_id, title, status, call_counts_json, created_at, updated_at
+      `SELECT task_id, title, description, status, call_counts_json, created_at, updated_at
        FROM tasks ORDER BY created_at DESC LIMIT 100`,
     )].map((task) => ({
       taskId: task.task_id,
       title: task.title,
+      description: task.description,
       status: task.status,
       callCounts: JSON.parse(task.call_counts_json) as unknown,
       createdAt: task.created_at,
@@ -432,12 +447,13 @@ export class ConversationAgent {
     if (!existing) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
     const now = new Date().toISOString();
     this.#sql.exec(
-      `UPDATE tasks SET title = ?, status = ?, updated_at = ? WHERE task_id = ?`,
-      input.title, input.status, now, input.taskId,
+      `UPDATE tasks SET title = ?, description = ?, status = ?, updated_at = ? WHERE task_id = ?`,
+      input.title, input.description, input.status, now, input.taskId,
     );
     const task = {
       taskId: input.taskId,
       title: input.title,
+      description: input.description,
       status: input.status,
       callCounts: {},
       createdAt: existing.created_at,

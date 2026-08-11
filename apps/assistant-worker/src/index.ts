@@ -1259,7 +1259,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const body = value as Record<string, unknown>;
     if (typeof body["conversationId"] !== "string" ||
       typeof body["title"] !== "string" || body["title"].length === 0 ||
-      body["title"].length > 500 ||
+      body["title"].length > 500 || typeof body["description"] !== "string" ||
+      body["description"].length === 0 || body["description"].length > 32_768 ||
       (body["status"] !== "pending" && body["status"] !== "in-progress" &&
         body["status"] !== "completed")) {
       return problem(context.req.raw, 400, "INVALID_REQUEST");
@@ -1271,7 +1272,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     return mutateConversationResource(context, "task-update", `/tasks/${encodeURIComponent(taskId)}`,
       "PATCH", {
         conversationId: body["conversationId"], taskId,
-        title: body["title"], status: body["status"],
+        title: body["title"], description: body["description"], status: body["status"],
       });
   });
 
