@@ -256,7 +256,7 @@ export function App() {
           : tab === "conversation"
             ? rows(data["messages"])
             : tab === "connections"
-              ? rows(data["connections"])
+              ? rows(data["connections"]).filter((connection) => connection["status"] === "active")
             : [];
   const providerRows = rows(data["providers"]);
   const activeProviderId = display(
@@ -268,6 +268,10 @@ export function App() {
     Array.isArray(provider["allowedVisibilities"]) &&
     provider["allowedVisibilities"].includes("owner")
   );
+  const activeGoogleConnections = tab === "connections"
+    ? collection.filter((connection) =>
+        connection["providerId"] === "google" && connection["status"] === "active")
+    : [];
   const activeTab = tabs.find((item) => item.id === tab);
 
   return <div className="shell">
@@ -342,7 +346,9 @@ export function App() {
         <section className="connection-actions">
           <div><strong>Google</strong><p>{t("connections.googleHelp")}</p></div>
           <button disabled={busy} onClick={() => void connectGoogle()}>
-            {t("connections.connectGoogle")}
+            {t(activeGoogleConnections.length > 0
+              ? "connections.addGoogleAccount"
+              : "connections.connectGoogle")}
           </button>
         </section>}
       {tab === "tasks" &&
@@ -378,17 +384,27 @@ export function App() {
                   </div>
                 : collection.map((item, index) =>
                     <article key={display(
-                      item["taskId"] ?? item["key"] ?? item["approvalId"] ??
+                      item["taskId"] ?? item["key"] ?? item["approvalId"] ?? item["connectionId"] ??
                         item["eventId"] ?? item["messageId"],
                       String(index),
                     )}>
                       <div>
-                        <strong>{display(
-                          item["title"] ?? item["key"] ?? item["eventType"] ??
-                            item["capabilityId"] ?? item["role"],
-                          t("item.fallback"),
-                        )}</strong>
-                        <p>{display(item["value"] ?? item["content"] ?? item["status"] ?? item["outcome"])}</p>
+                        {tab === "connections"
+                          ? <>
+                              <strong>{t("connections.destination")}: {display(item["providerId"], "Google")}</strong>
+                              <p>{t("connections.account")}: {display(
+                                item["accountLabel"] ?? item["connectionId"],
+                                t("connections.unknownAccount"),
+                              )}</p>
+                            </>
+                          : <>
+                              <strong>{display(
+                                item["title"] ?? item["key"] ?? item["eventType"] ??
+                                  item["capabilityId"] ?? item["role"],
+                                t("item.fallback"),
+                              )}</strong>
+                              <p>{display(item["value"] ?? item["content"] ?? item["status"] ?? item["outcome"])}</p>
+                            </>}
                       </div>
                       {tab === "approvals" && item["status"] === "pending" &&
                         <div className="actions">
@@ -401,7 +417,7 @@ export function App() {
                         </div>}
                       {tab === "connections" && item["status"] === "active" &&
                         <div className="actions">
-                          <button className="danger" disabled={busy} onClick={() => void disconnect(display(item["connection_id"]))}>
+                          <button className="danger" disabled={busy} onClick={() => void disconnect(display(item["connectionId"]))}>
                             {t("connections.disconnect")}
                           </button>
                         </div>}

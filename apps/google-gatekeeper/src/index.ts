@@ -42,6 +42,37 @@ type TransactionRow = {
   consumed_at: string | null;
 };
 
+type GoogleIdentity = {
+  subject: string;
+  email: string;
+};
+
+const encoder = new TextEncoder();
+
+const encodeHex = (value: ArrayBuffer): string =>
+  [...new Uint8Array(value)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+const googleIdentity = async (accessToken: string): Promise<GoogleIdentity> => {
+  const response = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(`Google userinfo failed (${response.status})`);
+  const value: Record<string, unknown> = await response.json();
+  if (typeof value["sub"] !== "string" || typeof value["email"] !== "string" ||
+    value["email_verified"] !== true) throw new Error("Google identity is not verified");
+  return { subject: value["sub"], email: value["email"] };
+};
+
+const subjectHash = async (env: Bindings, deploymentId: string, subject: string): Promise<string> => {
+  const keyBytes = await crypto.subtle.digest("SHA-256", encoder.encode(env.CREDENTIAL_KEK.trim()));
+  const key = await crypto.subtle.importKey(
+    "raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  return encodeHex(await crypto.subtle.sign(
+    "HMAC", key, encoder.encode(`${deploymentId}\u0000google\u0000${subject}`),
+  ));
+};
+
 const json = (value: unknown, status = 200): Response => Response.json(value, {
   status,
   headers: { "Cache-Control": "no-store" },
@@ -138,40 +169,75 @@ async function callback(request: Request, env: Bindings): Promise<Response> {
     now,
   });
   if (!credential.refreshToken) return json({ code: "OAUTH_RECONSENT_REQUIRED" }, 409);
-  const connectionId = `connection:google:${crypto.randomUUID()}`;
+  const identity = await googleIdentity(credential.accessToken);
+  const externalSubjectHash = await subjectHash(env, body["deploymentId"], identity.subject);
+  const existing = await env.GATEKEEPER_DB.prepare(
+    `SELECT connection_id FROM connections
+     WHERE deployment_id = ? AND provider_id = 'google' AND connection_kind = 'personal'
+       AND external_subject_hash = ? AND status = 'active'`,
+  ).bind(body["deploymentId"], externalSubjectHash).first<{ connection_id: string }>();
+  const connectionId = existing?.connection_id ?? `connection:google:${crypto.randomUUID()}`;
+  const storedCredential = { ...credential, externalSubject: identity.subject };
   const envelope = await encryptCredential({
-    credential,
+    credential: storedCredential,
     kek: env.CREDENTIAL_KEK,
     keyId: env.CREDENTIAL_KEY_ID,
     deploymentId: body["deploymentId"],
     connectionId,
   });
-  await env.GATEKEEPER_DB.batch([
-    env.GATEKEEPER_DB.prepare(
-      `INSERT INTO connections
-       (deployment_id, connection_id, connection_kind, provider_id, external_subject_hash,
-        scopes_json, resource_allowlist_json, status, created_at, updated_at)
-       VALUES (?, ?, 'personal', 'google', NULL, ?, '[]', 'active', ?, ?)`,
-    ).bind(body["deploymentId"], connectionId, JSON.stringify(credential.scopes),
-      now.toISOString(), now.toISOString()),
-    env.GATEKEEPER_DB.prepare(
-      `INSERT INTO encrypted_credentials
-       (deployment_id, connection_id, key_id, wrapped_data_key, nonce, ciphertext, created_at, rotated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-    ).bind(body["deploymentId"], connectionId, envelope.keyId, envelope.wrappedDataKey,
-      envelope.nonce, envelope.ciphertext, now.toISOString()),
-  ]);
-  return json({ connectionId, providerId: "google", status: "active" }, 201);
+  if (existing) {
+    await env.GATEKEEPER_DB.batch([
+      env.GATEKEEPER_DB.prepare(
+        `UPDATE connections SET scopes_json = ?, account_label = ?, updated_at = ?
+         WHERE deployment_id = ? AND connection_id = ?`,
+      ).bind(JSON.stringify(storedCredential.scopes), identity.email, now.toISOString(),
+        body["deploymentId"], connectionId),
+      env.GATEKEEPER_DB.prepare(
+        `UPDATE encrypted_credentials
+         SET key_id = ?, wrapped_data_key = ?, nonce = ?, ciphertext = ?, rotated_at = ?
+         WHERE deployment_id = ? AND connection_id = ?`,
+      ).bind(envelope.keyId, envelope.wrappedDataKey, envelope.nonce, envelope.ciphertext,
+        now.toISOString(), body["deploymentId"], connectionId),
+    ]);
+  } else {
+    await env.GATEKEEPER_DB.batch([
+      env.GATEKEEPER_DB.prepare(
+        `INSERT INTO connections
+         (deployment_id, connection_id, connection_kind, provider_id, external_subject_hash,
+          scopes_json, resource_allowlist_json, status, account_label, created_at, updated_at)
+         VALUES (?, ?, 'personal', 'google', ?, ?, '[]', 'active', ?, ?, ?)`,
+      ).bind(body["deploymentId"], connectionId, externalSubjectHash,
+        JSON.stringify(storedCredential.scopes), identity.email, now.toISOString(), now.toISOString()),
+      env.GATEKEEPER_DB.prepare(
+        `INSERT INTO encrypted_credentials
+         (deployment_id, connection_id, key_id, wrapped_data_key, nonce, ciphertext, created_at, rotated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      ).bind(body["deploymentId"], connectionId, envelope.keyId, envelope.wrappedDataKey,
+        envelope.nonce, envelope.ciphertext, now.toISOString()),
+    ]);
+  }
+  return json({ connectionId, providerId: "google", accountLabel: identity.email, status: "active" },
+    existing ? 200 : 201);
 }
 
 async function list(request: Request, env: Bindings): Promise<Response> {
   const deploymentId = new URL(request.url).searchParams.get("deploymentId");
   if (!deploymentId) return json({ code: "INVALID_REQUEST" }, 400);
   const rows = await env.GATEKEEPER_DB.prepare(
-    `SELECT connection_id, connection_kind, provider_id, scopes_json, status, created_at, updated_at
+    `SELECT connection_id, connection_kind, provider_id, scopes_json, status, account_label,
+            created_at, updated_at
      FROM connections WHERE deployment_id = ? AND provider_id = 'google' ORDER BY created_at DESC`,
   ).bind(deploymentId).all();
-  return json({ connections: rows.results });
+  return json({ connections: rows.results.map((row) => ({
+    connectionId: row["connection_id"],
+    kind: row["connection_kind"],
+    providerId: row["provider_id"],
+    scopes: JSON.parse(String(row["scopes_json"])) as unknown,
+    status: row["status"],
+    accountLabel: row["account_label"],
+    createdAt: row["created_at"],
+    updatedAt: row["updated_at"],
+  })) });
 }
 
 async function disconnect(request: Request, env: Bindings): Promise<Response> {
@@ -184,24 +250,37 @@ async function disconnect(request: Request, env: Bindings): Promise<Response> {
   ).bind(body["deploymentId"], body["connectionId"]).first<{
     key_id: string; wrapped_data_key: string; nonce: string; ciphertext: string;
   }>();
-  if (!row) return json({ code: "NOT_FOUND" }, 404);
-  const credential = await decryptCredential({
-    envelope: {
-      keyId: row.key_id,
-      wrappedDataKey: row.wrapped_data_key,
-      nonce: row.nonce,
-      ciphertext: row.ciphertext,
-    },
-    kek: env.CREDENTIAL_KEK,
-    deploymentId: body["deploymentId"],
-    connectionId: body["connectionId"],
-  });
-  await revokeAccessToken({
-    provider: OAUTH_PROVIDERS.google,
-    clientId: env.GOOGLE_CLIENT_ID,
-    clientSecret: env.GOOGLE_CLIENT_SECRET,
-    credential,
-  });
+  if (!row) {
+    await env.GATEKEEPER_DB.prepare(
+      `UPDATE connections SET status = 'revoked', updated_at = ?
+       WHERE deployment_id = ? AND connection_id = ?`,
+    ).bind(new Date().toISOString(), body["deploymentId"], body["connectionId"]).run();
+    return new Response(null, { status: 204 });
+  }
+  let remoteRevocation = "succeeded";
+  try {
+    const credential = await decryptCredential({
+      envelope: {
+        keyId: row.key_id,
+        wrappedDataKey: row.wrapped_data_key,
+        nonce: row.nonce,
+        ciphertext: row.ciphertext,
+      },
+      kek: env.CREDENTIAL_KEK,
+      deploymentId: body["deploymentId"],
+      connectionId: body["connectionId"],
+    });
+    await revokeAccessToken({
+      provider: OAUTH_PROVIDERS.google,
+      clientId: env.GOOGLE_CLIENT_ID,
+      clientSecret: env.GOOGLE_CLIENT_SECRET,
+      credential,
+    });
+  } catch {
+    // Local credential deletion must still succeed when a legacy key cannot be
+    // decrypted or the provider has already invalidated the token.
+    remoteRevocation = "failed";
+  }
   await env.GATEKEEPER_DB.batch([
     env.GATEKEEPER_DB.prepare(
       `DELETE FROM encrypted_credentials WHERE deployment_id = ? AND connection_id = ?`,
@@ -211,7 +290,10 @@ async function disconnect(request: Request, env: Bindings): Promise<Response> {
        WHERE deployment_id = ? AND connection_id = ?`,
     ).bind(new Date().toISOString(), body["deploymentId"], body["connectionId"]),
   ]);
-  return new Response(null, { status: 204 });
+  return new Response(null, {
+    status: 204,
+    headers: { "X-OPAP-Remote-Revocation": remoteRevocation },
+  });
 }
 
 export default {
