@@ -84,15 +84,17 @@ export const listGitHubPullRequests = (
   return githubJson(url, "pulls.list", options);
 };
 
-export const listGitHubNotifications = (
-  input: { all?: boolean; participating?: boolean; perPage?: number },
+export const listGitHubInbox = (
+  input: { perPage?: number },
   options: GitHubRequestOptions,
 ): Promise<unknown> => {
-  const url = new URL("https://api.github.com/notifications");
-  url.searchParams.set("all", String(input.all ?? false));
-  url.searchParams.set("participating", String(input.participating ?? false));
+  const url = new URL("https://api.github.com/issues");
+  url.searchParams.set("filter", "subscribed");
+  url.searchParams.set("state", "open");
+  url.searchParams.set("sort", "updated");
+  url.searchParams.set("direction", "desc");
   url.searchParams.set("per_page", String(Math.min(Math.max(input.perPage ?? 20, 1), 50)));
-  return githubJson(url, "notifications.list", options);
+  return githubJson(url, "inbox.list", options);
 };
 
 export const listGitHubIssueComments = (

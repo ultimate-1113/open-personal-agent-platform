@@ -24,7 +24,7 @@ export const en = {
   "connections.addGoogleAccount": "Add another Google account",
   "connections.connectGitHub": "Connect GitHub",
   "connections.addGitHubAccount": "Add another GitHub account",
-  "connections.githubHelp": "Use an owner-only credential for GitHub notifications, repositories, issues, pull requests, and comments.",
+  "connections.githubHelp": "Use an owner-only credential for GitHub repositories, subscribed issues, pull requests, and comments.",
   "connections.unknownService": "Unknown service",
   "connections.destination": "Service",
   "connections.account": "Account",

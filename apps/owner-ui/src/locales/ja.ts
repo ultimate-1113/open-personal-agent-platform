@@ -26,7 +26,7 @@ export const ja = {
   "connections.addGoogleAccount": "別のGoogleアカウントを追加",
   "connections.connectGitHub": "GitHubへ接続",
   "connections.addGitHubAccount": "別のGitHubアカウントを追加",
-  "connections.githubHelp": "GitHubの通知、Repository、Issue、Pull Request、コメントをOwner専用Credentialで扱います。",
+  "connections.githubHelp": "GitHubのRepository、購読中のIssue、Pull Request、コメントをOwner専用Credentialで扱います。",
   "connections.unknownService": "不明なサービス",
   "connections.destination": "接続先",
   "connections.account": "アカウント",

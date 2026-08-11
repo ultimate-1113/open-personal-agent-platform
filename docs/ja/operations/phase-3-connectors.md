@@ -16,7 +16,7 @@ Phase 3では、Phase 2で確立したWorker境界を緩めずにGoogle、GitHub
 共通OAuth基盤、Google Personal Gatekeeper、GitHub Personal Gatekeeperは実装済みです。
 Gmailは、正確な宛先、件名、本文をOwnerが承認した後にだけ送信します。
 送信先を配置時のAllowlistで制限しません。
-GitHubは通知、Repository、Issue、Pull Request、IssueまたはPull Requestのコメントを読み取ります。
+GitHubはRepository、購読中のIssue、Pull Request、IssueまたはPull Requestのコメントを読み取ります。
 Issue作成とコメント投稿は、Ownerが内容を承認した後にだけ実行します。
 GitHubのコード変更とPull Request作成は実装しません。
 DiscordとDelegated Source Gatekeeperは実装中です。
@@ -32,7 +32,6 @@ GitHub Appには次の値を設定します。
 
 GitHub Appには次の最小権限を設定します。
 
-- **Account permissions / Notifications**：Read-only
 - **Repository permissions / Contents**：Read-only
 - **Repository permissions / Issues**：Read and write
 - **Repository permissions / Pull requests**：Read-only
@@ -41,7 +40,8 @@ GitHub Appには次の最小権限を設定します。
 Appは必要なRepositoryだけへInstallします。
 User Tokenで利用できるRepositoryは、利用者の権限とApp Installationの対象範囲の積集合です。
 
-未読通知はOwnerの要求時に取得します。
+GitHubの通知一覧APIはGitHub App User Access Tokenに対応しないため使用しません。
+Ownerの要求時に、更新日時順の購読中IssueとPull Requestを受信箱として取得します。
 常時ポーリングはWorkers要求とGitHub API Rate Limitを消費するため、v0.1では行いません。
 Webhookによる自動取込は、署名検証専用の公開Workerを追加してから有効にします。
 

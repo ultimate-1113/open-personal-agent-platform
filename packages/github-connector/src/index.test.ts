@@ -4,7 +4,7 @@ import {
   createGitHubIssueComment,
   getAuthenticatedGitHubUser,
   listGitHubIssueComments,
-  listGitHubNotifications,
+  listGitHubInbox,
   listGitHubPullRequests,
   listGitHubRepositories,
   searchGitHubCode,
@@ -46,16 +46,17 @@ describe("GitHub connector", () => {
     expect((fetcher.mock.calls[1]?.[0] as URL).pathname).toBe("/repos/owner/repo/issues/12/comments");
   });
 
-  it("reads notifications and issue conversation comments without marking them read", async () => {
+  it("reads the subscribed issue inbox and conversation comments without mutating them", async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(response([]))
       .mockResolvedValueOnce(response([]));
-    await listGitHubNotifications({ participating: true, perPage: 500 },
+    await listGitHubInbox({ perPage: 500 },
       { accessToken: "token", fetcher });
     await listGitHubIssueComments({ repository: "owner/repo", issueNumber: 7 },
       { accessToken: "token", fetcher });
-    expect((fetcher.mock.calls[0]?.[0] as URL).pathname).toBe("/notifications");
-    expect((fetcher.mock.calls[0]?.[0] as URL).searchParams.get("participating")).toBe("true");
+    expect((fetcher.mock.calls[0]?.[0] as URL).pathname).toBe("/issues");
+    expect((fetcher.mock.calls[0]?.[0] as URL).searchParams.get("filter")).toBe("subscribed");
+    expect((fetcher.mock.calls[0]?.[0] as URL).searchParams.get("sort")).toBe("updated");
     expect((fetcher.mock.calls[0]?.[0] as URL).searchParams.get("per_page")).toBe("50");
     expect(fetcher.mock.calls[0]?.[1]?.method).toBeUndefined();
     expect((fetcher.mock.calls[1]?.[0] as URL).pathname)

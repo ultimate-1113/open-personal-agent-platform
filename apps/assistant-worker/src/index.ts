@@ -597,8 +597,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     forwardGitHubRead(context, "/internal/v1/github/code/search"));
   app.post("/v1/github/:connectionId/pulls", (context) =>
     forwardGitHubRead(context, "/internal/v1/github/pulls/list"));
-  app.post("/v1/github/:connectionId/notifications", (context) =>
-    forwardGitHubRead(context, "/internal/v1/github/notifications/list"));
+  app.post("/v1/github/:connectionId/inbox", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/inbox/list"));
   app.post("/v1/github/:connectionId/issue-comments", (context) =>
     forwardGitHubRead(context, "/internal/v1/github/issue-comments/list"));
 
@@ -818,8 +818,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         `${connection.connectionId}: ${connection.accountLabel ?? "GitHub account"}`).join("; ") };
     const base = { connectionId: connectionProperty };
     return [
-      { name: "github_notifications_list", description: "List unread GitHub notifications involving the owner.",
-        parameters: { type: "object", properties: { ...base, participating: { type: "boolean" } }, required: ["connectionId"] } },
+      { name: "github_inbox_list", description: "List open subscribed GitHub issues and pull requests, newest updates first.",
+        parameters: { type: "object", properties: base, required: ["connectionId"] } },
       { name: "github_issues_search", description: "Search GitHub issues and pull requests.",
         parameters: { type: "object", properties: { ...base, query: { type: "string" } }, required: ["connectionId", "query"] } },
       { name: "github_code_search", description: "Search code accessible to the GitHub App installation.",
@@ -859,9 +859,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const repository = call.arguments["repository"];
     const issueNumber = call.arguments["issueNumber"];
     const body = call.arguments["body"];
-    if (call.name === "github_notifications_list") {
-      return `GitHub通知（モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
-        "/internal/v1/github/notifications/list", { participating: call.arguments["participating"] === true }), null, 2)}`;
+    if (call.name === "github_inbox_list") {
+      return `GitHub受信箱（購読中のIssueとPull Request、モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
+        "/internal/v1/github/inbox/list", {}), null, 2)}`;
     }
     if (call.name === "github_issues_search" || call.name === "github_code_search") {
       const query = call.arguments["query"];
@@ -1176,7 +1176,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         ...(tools.length > 0
           ? [{
               role: "system" as const,
-              content: "You are the owner's personal agent. Use available Google and GitHub tools when needed. GitHub notifications and issue or pull-request comments are inbound messages to handle. Never claim a write completed when it only requested approval.",
+              content: "You are the owner's personal agent. Use available Google and GitHub tools when needed. Subscribed GitHub issues, pull requests, and their comments are inbound messages to handle. Never claim a write completed when it only requested approval.",
             }]
           : []),
         { role: "user", content },

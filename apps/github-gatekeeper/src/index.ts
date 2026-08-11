@@ -6,7 +6,7 @@ import {
   createGitHubIssueComment,
   getAuthenticatedGitHubUser,
   listGitHubIssueComments,
-  listGitHubNotifications,
+  listGitHubInbox,
   listGitHubPullRequests,
   listGitHubRepositories,
   searchGitHubCode,
@@ -288,12 +288,8 @@ const githubRead = async (request: Request, env: Bindings, operation: string): P
     if (operation === "pulls.list" && typeof body["repository"] === "string") {
       return json(await listGitHubPullRequests({ repository: body["repository"], perPage: 20 }, options));
     }
-    if (operation === "notifications.list") {
-      return json(await listGitHubNotifications({
-        all: body["all"] === true,
-        participating: body["participating"] === true,
-        perPage: 20,
-      }, options));
+    if (operation === "inbox.list") {
+      return json(await listGitHubInbox({ perPage: 20 }, options));
     }
     if (operation === "issue-comments.list" && typeof body["repository"] === "string" &&
       typeof body["issueNumber"] === "number" && Number.isSafeInteger(body["issueNumber"]) &&
@@ -417,8 +413,8 @@ export default {
     if (request.method === "POST" && path === "/internal/v1/github/pulls/list") {
       return githubRead(request, env, "pulls.list");
     }
-    if (request.method === "POST" && path === "/internal/v1/github/notifications/list") {
-      return githubRead(request, env, "notifications.list");
+    if (request.method === "POST" && path === "/internal/v1/github/inbox/list") {
+      return githubRead(request, env, "inbox.list");
     }
     if (request.method === "POST" && path === "/internal/v1/github/issue-comments/list") {
       return githubRead(request, env, "issue-comments.list");

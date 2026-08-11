@@ -16,7 +16,7 @@ Phase 3 adds Google, GitHub, and Discord without weakening the worker boundaries
 The shared OAuth foundation, Google Personal Gatekeeper, and GitHub Personal Gatekeeper are implemented.
 Gmail messages are sent only after the owner approves the exact recipient, subject, and body.
 Recipient addresses are not restricted by a deployment allowlist.
-GitHub reads notifications, repositories, issues, pull requests, and issue or pull-request comments.
+GitHub reads repositories, subscribed issues, pull requests, and issue or pull-request comments.
 Creating an issue or posting a comment runs only after owner approval.
 GitHub code changes and pull-request creation are not implemented.
 Discord and Delegated Source Gatekeepers remain in progress.
@@ -32,7 +32,6 @@ Configure the GitHub App with these values:
 
 Grant the GitHub App these minimum permissions:
 
-- **Account permissions / Notifications**: Read-only
 - **Repository permissions / Contents**: Read-only
 - **Repository permissions / Issues**: Read and write
 - **Repository permissions / Pull requests**: Read-only
@@ -41,7 +40,8 @@ Grant the GitHub App these minimum permissions:
 Install the App only on required repositories.
 A user token can access only the intersection of the user's permissions and the App installation's repository selection.
 
-Unread notifications are fetched on owner request.
+The GitHub notifications endpoint is not used because it does not support GitHub App user access tokens.
+On owner request, the inbox lists subscribed issues and pull requests by most recent update.
 v0.1 does not poll continuously because polling consumes Workers requests and GitHub API rate limits.
 Automatic webhook ingestion will be enabled only after adding a dedicated public worker for signature verification.
 
