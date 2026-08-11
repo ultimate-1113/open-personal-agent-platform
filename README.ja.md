@@ -96,6 +96,7 @@ pnpm check
 - [Identity設定](docs/ja/operations/identity-configuration.md)
 - [Owner操作面](docs/ja/operations/owner-surface.md)
 - [Phase 3 Connector](docs/ja/operations/phase-3-connectors.md)
+- [Google・GitHub Provider設定](docs/ja/operations/connector-provider-setup.md)
 - [多言語対応](docs/ja/contributing/localization.md)
 
 ## セキュリティとライセンス

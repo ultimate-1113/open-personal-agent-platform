@@ -96,6 +96,7 @@ See [resource budgets](docs/en/operations/resource-budgets.md).
 - [Identity configuration](docs/en/operations/identity-configuration.md)
 - [Owner surface](docs/en/operations/owner-surface.md)
 - [Phase 3 connectors](docs/en/operations/phase-3-connectors.md)
+- [Google and GitHub provider setup](docs/en/operations/connector-provider-setup.md)
 - [Localization](docs/en/contributing/localization.md)
 
 ## Security and license

@@ -3,6 +3,7 @@
 [English](../../en/operations/phase-3-connectors.md)
 
 Phase 3では、Phase 2で確立したWorker境界を緩めずにGoogle、GitHub、Discordを追加します。
+外部管理画面の作成手順、ScopeとPermissionの対応、Secret、変更時の確認事項は[Google・GitHub Provider設定](connector-provider-setup.md)に記載します。
 
 ## 実装順序
 
@@ -16,7 +17,7 @@ Phase 3では、Phase 2で確立したWorker境界を緩めずにGoogle、GitHub
 共通OAuth基盤、Google Personal Gatekeeper、GitHub Personal Gatekeeperは実装済みです。
 Gmailは、正確な宛先、件名、本文をOwnerが承認した後にだけ送信します。
 送信先を配置時のAllowlistで制限しません。
-GitHubはRepository、購読中のIssue、Pull Request、IssueまたはPull Requestのコメントを読み取ります。
+GitHubはRepository、Code、購読中のIssue、Pull Request、IssueまたはPull Requestのコメントを読み取ります。
 Issue作成とコメント投稿は、Ownerが内容を承認した後にだけ実行します。
 GitHubのコード変更とPull Request作成は実装しません。
 DiscordとDelegated Source Gatekeeperは実装中です。
