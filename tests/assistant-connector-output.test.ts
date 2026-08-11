@@ -5,7 +5,9 @@ import {
   formatConnectorResult,
   githubRepositoryFullNames,
   inferCalendarRange,
+  isRepositoryIssueListRequest,
   normalConversationContext,
+  repositoryMention,
   selectConnectorToolNames,
 } from "../apps/assistant-worker/src/index.js";
 
@@ -48,6 +50,15 @@ describe("assistant connector output", () => {
       { role: "assistant", content: "private connector result",
         informationPolicy: { sensitivity: "sensitive" } },
     ] })).toEqual([{ role: "user", content: "normal" }]);
+  });
+
+  it("detects a repository-scoped Issue listing without treating it as a write", () => {
+    const prompt = "ultimate-1113/open-personal-agent-platformにissueある？";
+    expect(repositoryMention(prompt)).toBe("ultimate-1113/open-personal-agent-platform");
+    expect(isRepositoryIssueListRequest(prompt)).toBe(true);
+    expect(selectConnectorToolNames(prompt)).toEqual(["github_issues_search"]);
+    expect(isRepositoryIssueListRequest("ultimate-1113/open-personal-agent-platformにIssueを作成して"))
+      .toBe(false);
   });
 
   it("limits a Japanese next-year Calendar request to exactly one year", () => {

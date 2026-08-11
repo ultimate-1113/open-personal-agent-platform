@@ -306,6 +306,19 @@ export const continuationIntentPrompt = (
   return previousUser ? `${previousUser.content}\n${content}` : content;
 };
 
+export const repositoryMention = (prompt: string): string | undefined => {
+  const match = prompt.normalize("NFKC").match(
+    /(?:^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?=$|[^A-Za-z0-9_.-])/u,
+  );
+  return match?.[1];
+};
+
+export const isRepositoryIssueListRequest = (prompt: string): boolean =>
+  repositoryMention(prompt) !== undefined &&
+  /(?:issues?|イシュー)/iu.test(prompt) &&
+  /(?:ある|あります|存在|一覧|list|any)/iu.test(prompt) &&
+  !/(?:作成|追加|登録|create|add|コメント|comment)/iu.test(prompt);
+
 const GOOGLE_TOOL_NAMES = new Set([
   "google_gmail_search",
   "google_calendar_list_events",
@@ -1468,6 +1481,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       "google_calendar_list_events",
       "github_repositories_list",
       "github_inbox_list",
+      ...(isRepositoryIssueListRequest(intentPrompt) ? ["github_issues_search"] : []),
     ].includes(intendedToolNames[0] ?? "")
       ? intendedToolNames[0] : undefined;
     const deterministicConnection = deterministicToolName?.startsWith("google_")
@@ -1481,6 +1495,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           arguments: {
             connectionId: deterministicConnection.connectionId,
             ...(deterministicToolName === "google_gmail_search" ? { query: "" } : {}),
+            ...(deterministicToolName === "github_issues_search"
+              ? { query: `repo:${repositoryMention(intentPrompt)} is:issue` } : {}),
           },
         }
       : undefined;
@@ -1585,6 +1601,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (generated.toolCalls?.length) {
       const outputs: string[] = [];
       let writeRequested = false;
+      let connectorToolFailed = false;
       for (const call of generated.toolCalls.slice(0, 3)) {
         const isWrite = call.name === "google_gmail_send" ||
           call.name === "google_calendar_create_event" ||
@@ -1599,11 +1616,12 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
             ? await executeGitHubAgentTool(context, call, githubConnections, conversationId)
             : await executeGoogleAgentTool(context, call, googleConnections, content, now, conversationId));
         } catch {
+          connectorToolFailed = true;
           outputs.push(`Tool ${call.name} の実行に失敗しました。`);
         }
       }
       assistantContent = outputs.map(formatConnectorResult).join("\n\n");
-      if (!writeRequested && outputs.length > 0) {
+      if (!writeRequested && outputs.length > 0 && !connectorToolFailed) {
         const rawToolContent = outputs.join("\n\n");
         const modelToolContent = rawToolContent.length <= 65_536
           ? rawToolContent
