@@ -8,6 +8,8 @@ import {
   exchangeAuthorizationCode,
   refreshAccessToken,
   revokeAccessToken,
+  openTransientSecret,
+  sealTransientSecret,
   verifyAuthorizationCallback,
 } from "./index.js";
 
@@ -221,6 +223,18 @@ describe("OAuth authorization flow", () => {
 });
 
 describe("OAuth credential envelope encryption", () => {
+  it("seals a short-lived transaction secret with context binding", async () => {
+    const kek = createCredentialKek();
+    const sealed = await sealTransientSecret({ secret: "verifier", kek, context: "tx:1" });
+    expect(sealed).not.toContain("verifier");
+    await expect(openTransientSecret({ sealed, kek, context: "tx:1" }))
+      .resolves.toBe("verifier");
+    await expect(openTransientSecret({ sealed, kek, context: "tx:2" }))
+      .rejects.toThrow();
+    await expect(openTransientSecret({ sealed: "invalid", kek, context: "tx:1" }))
+      .rejects.toThrow("Invalid");
+  });
+
   it("round-trips a credential and binds it to deployment and connection", async () => {
     const kek = createCredentialKek();
     const credential = {

@@ -32,6 +32,7 @@ type Bindings = {
   ACCESS_AUDIENCE: string;
   ACCESS_JWKS_URI: string;
   CONTROL: Fetcher;
+  GOOGLE_GATEKEEPER: Fetcher;
   CONVERSATIONS: DurableObjectNamespace;
   OWNER_QUOTA: DurableObjectNamespace;
   AI?: WorkersAiBinding;
@@ -361,6 +362,65 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     app.use(route, authorizeConversation);
     app.use(`${route}/*`, authorizeConversation);
   }
+  app.use("/v1/connections", authorizeConversation);
+  app.use("/v1/connections/*", authorizeConversation);
+
+  app.get("/v1/connections", async (context) => {
+    const url = new URL("https://google-gatekeeper.internal/internal/v1/connections");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const response = await context.env.GOOGLE_GATEKEEPER.fetch(url);
+    return new Response(response.body, response);
+  });
+
+  app.post("/v1/connections/google/start", async (context) => {
+    const requestUrl = new URL(context.req.url);
+    const redirectUri = new URL("/v1/connections/google/callback", requestUrl.origin).toString();
+    const response = await context.env.GOOGLE_GATEKEEPER.fetch(
+      "https://google-gatekeeper.internal/internal/v1/oauth/start",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID, redirectUri }),
+      },
+    );
+    return new Response(response.body, response);
+  });
+
+  app.get("/v1/connections/google/callback", async (context) => {
+    const state = context.req.query("state");
+    const code = context.req.query("code");
+    if (!state || !code) return problem(context.req.raw, 400, "OAUTH_CALLBACK_INVALID");
+    const response = await context.env.GOOGLE_GATEKEEPER.fetch(
+      "https://google-gatekeeper.internal/internal/v1/oauth/callback",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"),
+          state,
+          code,
+        }),
+      },
+    );
+    if (!response.ok) return new Response(response.body, response);
+    return context.redirect("/?connection=google&status=connected", 302);
+  });
+
+  app.delete("/v1/connections/:connectionId", async (context) => {
+    const response = await context.env.GOOGLE_GATEKEEPER.fetch(
+      "https://google-gatekeeper.internal/internal/v1/connections",
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID,
+          connectionId: context.req.param("connectionId"),
+        }),
+      },
+    );
+    return new Response(response.body, response);
+  });
 
   app.get("/v1/settings/budgets", async (context) =>
     context.json({

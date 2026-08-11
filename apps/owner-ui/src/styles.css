@@ -97,6 +97,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .budget-form .check { display: flex; align-items: center; }
 .budget-form .check input { width: auto; }
 .warning { color: var(--warning); font-size: 13px; margin: 0; }
+.connection-actions { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 18px; margin-bottom: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 15px; }
+.connection-actions p { margin: 5px 0 0; color: var(--text-muted); font-size: 13px; }
+.connection-actions button { color: var(--accent-text); background: var(--accent); border: 0; border-radius: 8px; padding: 10px 15px; font-weight: 700; white-space: nowrap; }
 
 @media (max-width: 760px) {
   .shell { display: block; }

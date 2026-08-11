@@ -22,6 +22,10 @@
     {
       "binding": "CONTROL",
       "service": "opap-policy-control"
+    },
+    {
+      "binding": "GOOGLE_GATEKEEPER",
+      "service": "opap-google-gatekeeper"
     }
   ],
   "durable_objects": {

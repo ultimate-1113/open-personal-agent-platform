@@ -3,7 +3,7 @@ import { useLocale, type Locale, type Translate } from "./i18n.js";
 import type { MessageKey } from "./locales/en.js";
 import { useTheme } from "./theme.js";
 
-type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget";
+type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget" | "connections";
 type ApiRecord = Record<string, unknown>;
 
 const tabs: readonly { id: Tab; labelKey: MessageKey }[] = [
@@ -14,6 +14,7 @@ const tabs: readonly { id: Tab; labelKey: MessageKey }[] = [
   { id: "audit", labelKey: "tab.audit" },
   { id: "providers", labelKey: "tab.providers" },
   { id: "budget", labelKey: "tab.budget" },
+  { id: "connections", labelKey: "tab.connections" },
 ];
 
 const api = async (
@@ -90,6 +91,8 @@ export function App() {
         nextData = await request("/v1/audit");
       } else if (tab === "providers") {
         nextData = await request("/v1/settings/providers");
+      } else if (tab === "connections") {
+        nextData = await request("/v1/connections");
       } else {
         const [policy, usage] = await Promise.all([
           request("/v1/settings/budgets"),
@@ -215,6 +218,33 @@ export function App() {
     }
   };
 
+  const connectGoogle = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request("/v1/connections/google/start", { method: "POST" });
+      const authorizationUrl = display(result["authorizationUrl"]);
+      if (!authorizationUrl) throw new Error(t("errors.connection"));
+      window.location.assign(authorizationUrl);
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async (connectionId: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/connections/${encodeURIComponent(connectionId)}`, { method: "DELETE" });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const collection = tab === "tasks"
     ? rows(data["tasks"])
     : tab === "memory"
@@ -225,6 +255,8 @@ export function App() {
           ? rows(data["events"])
           : tab === "conversation"
             ? rows(data["messages"])
+            : tab === "connections"
+              ? rows(data["connections"])
             : [];
   const providerRows = rows(data["providers"]);
   const activeProviderId = display(
@@ -306,6 +338,13 @@ export function App() {
             {conversationId ? t("conversation.send") : t("conversation.create")}
           </button>
         </form>}
+      {tab === "connections" &&
+        <section className="connection-actions">
+          <div><strong>Google</strong><p>{t("connections.googleHelp")}</p></div>
+          <button disabled={busy} onClick={() => void connectGoogle()}>
+            {t("connections.connectGoogle")}
+          </button>
+        </section>}
       {tab === "tasks" &&
         <form onSubmit={(event) => { void submit(event); }} className="inline-form">
           <input name="title" required maxLength={500} placeholder={t("tasks.placeholder")} />
@@ -358,6 +397,12 @@ export function App() {
                           </button>
                           <button className="danger" disabled={busy} onClick={() => void decide(String(item["approvalId"]), "rejected")}>
                             {t("approvals.reject")}
+                          </button>
+                        </div>}
+                      {tab === "connections" && item["status"] === "active" &&
+                        <div className="actions">
+                          <button className="danger" disabled={busy} onClick={() => void disconnect(display(item["connection_id"]))}>
+                            {t("connections.disconnect")}
                           </button>
                         </div>}
                     </article>

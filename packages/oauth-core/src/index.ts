@@ -25,6 +25,40 @@ const randomBase64Url = (bytes: number): string => {
 const sha256Base64Url = async (value: string): Promise<string> =>
   encodeBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))));
 
+export const oauthStateDigest = sha256Base64Url;
+
+export async function sealTransientSecret(input: {
+  secret: string;
+  kek: string;
+  context: string;
+}): Promise<string> {
+  const key = await importKek(input.kek);
+  const nonce = new Uint8Array(12);
+  crypto.getRandomValues(nonce);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(input.context) },
+    key,
+    encoder.encode(input.secret),
+  );
+  return `${encodeBase64Url(nonce)}.${encodeBase64Url(new Uint8Array(ciphertext))}`;
+}
+
+export async function openTransientSecret(input: {
+  sealed: string;
+  kek: string;
+  context: string;
+}): Promise<string> {
+  const [nonce, ciphertext] = input.sealed.split(".");
+  if (!nonce || !ciphertext) throw new Error("Invalid sealed secret");
+  const key = await importKek(input.kek);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: decodeBase64Url(nonce), additionalData: encoder.encode(input.context) },
+    key,
+    decodeBase64Url(ciphertext),
+  );
+  return decoder.decode(plaintext);
+}
+
 export type OAuthClientAuthentication = "client-secret-post" | "client-secret-basic";
 
 export type OAuthProvider = {
