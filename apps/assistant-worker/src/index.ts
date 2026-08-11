@@ -209,6 +209,19 @@ export const formatConnectorResult = (output: string): string => {
   return `${label}\n${lines.join("\n")}`;
 };
 
+export const githubRepositoryFullNames = (value: unknown): string[] => {
+  const root = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+  const rows = Array.isArray(value) ? value : Array.isArray(root?.["items"])
+    ? root["items"] : Array.isArray(root?.["repositories"]) ? root["repositories"] : [];
+  return rows.flatMap((item): string[] => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+    const fullName = (item as Record<string, unknown>)["full_name"];
+    return typeof fullName === "string" && /^[^/\s]+\/[^/\s]+$/u.test(fullName)
+      ? [fullName] : [];
+  });
+};
+
 export const inferCalendarRange = (prompt: string, now: Date): { timeMin: string; timeMax: string } => {
   const normalized = prompt.normalize("NFKC");
   const value = (match: RegExpMatchArray | null): number | undefined => {
@@ -883,6 +896,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     connections: readonly ApiConnection[],
     prompt: string,
     currentDate: Date,
+    conversationId?: string,
   ): Promise<string> => {
     const requestedConnection = call.arguments["connectionId"];
     const requested = typeof requestedConnection === "string"
@@ -962,6 +976,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         connectionId, to, subject, body,
       }, {
         destination: to, operation: "Send Gmail message", subject, body,
+        ...(conversationId ? { conversationId } : {}),
       });
       const value: unknown = await approval.json().catch(() => ({}));
       if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
@@ -980,6 +995,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       if (typeof call.arguments["timeZone"] === "string") operation["timeZone"] = call.arguments["timeZone"];
       const approval = await requestExternalWriteApproval(context, "google.calendar.events.create", operation, {
         destination: "Google Calendar", operation: "Create calendar event", summary, start, end,
+        ...(conversationId ? { conversationId } : {}),
       });
       const value: unknown = await approval.json().catch(() => ({}));
       if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
@@ -1020,6 +1036,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   const executeGitHubAgentTool = async (
     context: Parameters<MiddlewareHandler<AssistantEnv>>[0], call: ModelToolCall,
     connections: readonly ApiConnection[],
+    conversationId?: string,
   ): Promise<string> => {
     const requested = typeof call.arguments["connectionId"] === "string"
       ? call.arguments["connectionId"].trim().toLocaleLowerCase() : "";
@@ -1041,6 +1058,19 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const repository = call.arguments["repository"];
     const issueNumber = call.arguments["issueNumber"];
     const body = call.arguments["body"];
+    const resolveRepository = async (requestedRepository: string): Promise<string | undefined> => {
+      const available = githubRepositoryFullNames(await githubFetch(
+        "/internal/v1/github/repositories/list", { perPage: 100 },
+      ));
+      const normalized = requestedRepository.trim().toLocaleLowerCase();
+      const matches = available.filter((fullName) => {
+        const candidate = fullName.toLocaleLowerCase();
+        return requestedRepository.includes("/")
+          ? candidate === normalized
+          : candidate.slice(candidate.indexOf("/") + 1) === normalized;
+      });
+      return matches.length === 1 ? matches[0] : undefined;
+    };
     if (call.name === "github_repositories_list") {
       return `GitHub Repository（モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
         "/internal/v1/github/repositories/list", {}), null, 2)}`;
@@ -1067,9 +1097,12 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         typeof title !== "string" || typeof body !== "string") {
         return "Issueを作成するには、Repository（owner/name）、タイトル、本文を指定してください。";
       }
+      const scopedRepository = await resolveRepository(repository);
+      if (!scopedRepository) return "対象Repositoryを一意に確認できませんでした。owner/name形式で指定してください。";
       const approval = await requestExternalWriteApproval(context, "github.issues.create",
-        { connectionId, repository, title, body },
-        { destination: repository, operation: "Create GitHub issue", title, body }, "gatekeeper:github-personal");
+        { connectionId, repository: scopedRepository, title, body },
+        { destination: scopedRepository, operation: "Create GitHub issue", title, body,
+          ...(conversationId ? { conversationId } : {}) }, "gatekeeper:github-personal");
       const value: unknown = await approval.json().catch(() => ({}));
       if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
       const id = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["approvalId"] : undefined;
@@ -1080,9 +1113,12 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         typeof issueNumber !== "number" || typeof body !== "string") {
         return "コメントを投稿するには、Repository（owner/name）、Issue番号、本文を指定してください。";
       }
+      const scopedRepository = await resolveRepository(repository);
+      if (!scopedRepository) return "対象Repositoryを一意に確認できませんでした。owner/name形式で指定してください。";
       const approval = await requestExternalWriteApproval(context, "github.issue-comments.create",
-        { connectionId, repository, issueNumber, body },
-        { destination: `${repository}#${issueNumber}`, operation: "Post GitHub comment", body }, "gatekeeper:github-personal");
+        { connectionId, repository: scopedRepository, issueNumber, body },
+        { destination: `${scopedRepository}#${issueNumber}`, operation: "Post GitHub comment", body,
+          ...(conversationId ? { conversationId } : {}) }, "gatekeeper:github-personal");
       const value: unknown = await approval.json().catch(() => ({}));
       if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
       const id = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["approvalId"] : undefined;
@@ -1504,8 +1540,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         if (isWrite) writeRequested = true;
         try {
           outputs.push(call.name.startsWith("github_")
-            ? await executeGitHubAgentTool(context, call, githubConnections)
-            : await executeGoogleAgentTool(context, call, googleConnections, content, now));
+            ? await executeGitHubAgentTool(context, call, githubConnections, conversationId)
+            : await executeGoogleAgentTool(context, call, googleConnections, content, now, conversationId));
         } catch {
           outputs.push(`Tool ${call.name} の実行に失敗しました。`);
         }
@@ -1851,8 +1887,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     try {
       rawResult = toolId.startsWith("google_")
         ? await executeGoogleAgentTool(context, call, googleConnections, question,
-            dependencies.now?.() ?? new Date())
-        : await executeGitHubAgentTool(context, call, githubConnections);
+            dependencies.now?.() ?? new Date(), conversationId)
+        : await executeGitHubAgentTool(context, call, githubConnections, conversationId);
     } catch {
       return problem(context.req.raw, 503, "CONNECTOR_TOOL_FAILED");
     }
@@ -1959,6 +1995,21 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (typeof approved["executionLease"] !== "string") {
       return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
     }
+    const approvalId = context.req.param("approvalId");
+    const recordExecutionOutcome = async (
+      executionStatus: "succeeded" | "failed" | "unknown",
+      errorCode?: string,
+    ): Promise<boolean> => {
+      const recorded = await context.env.CONTROL.fetch(
+        "https://control.internal/internal/v1/approvals/execution", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+            principalId: context.get("ownerPrincipalId"), approvalId, executionStatus,
+            ...(errorCode ? { errorCode } : {}),
+            requestId: context.req.header("cf-ray") ?? crypto.randomUUID() }),
+        });
+      return recorded.ok;
+    };
     if (approved["capabilityId"] === "model.connector-results.send") {
       const operation = approved["executionRequest"] as Record<string, unknown>;
       const conversationId = operation["conversationId"];
@@ -1994,6 +2045,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       }
       const fallbackDisplay = pending["display"];
       const appendFallback = async (code: string): Promise<Response> => {
+        await recordExecutionOutcome("failed", code);
         const appended = await conversation.fetch("https://conversation.internal/messages/assistant", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ principalId: context.get("ownerPrincipalId"),
@@ -2046,6 +2098,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           providerId: summary.providerId }),
       });
       const appendedValue: unknown = await appended.json().catch(() => ({}));
+      if (!await recordExecutionOutcome("succeeded")) {
+        return problem(context.req.raw, 503, "APPROVAL_EXECUTION_RECORD_FAILED");
+      }
       return appended.ok
         ? context.json({ ...approved, execution: appendedValue })
         : problem(context.req.raw, 503, "CONVERSATION_UNAVAILABLE");
@@ -2070,9 +2125,43 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       },
     );
     const executionResult: unknown = await execution.json().catch(() => ({}));
+    const executionRecord = typeof executionResult === "object" && executionResult !== null &&
+      !Array.isArray(executionResult) ? executionResult as Record<string, unknown> : {};
+    const executionCode = typeof executionRecord["code"] === "string"
+      ? executionRecord["code"] : execution.ok ? undefined : "EXTERNAL_EXECUTION_FAILED";
+    const executionStatus = execution.ok ? "succeeded" :
+      executionCode === "EXTERNAL_WRITE_UNKNOWN" ? "unknown" : "failed";
+    const recorded = await recordExecutionOutcome(executionStatus, executionCode);
+    const preview = typeof approved["preview"] === "object" && approved["preview"] !== null &&
+      !Array.isArray(approved["preview"]) ? approved["preview"] as Record<string, unknown> : {};
+    const conversationId = preview["conversationId"];
+    let conversationRecorded = true;
+    if (typeof conversationId === "string" && /^conversation:[a-f0-9]{64}$/u.test(conversationId)) {
+      const messages: Record<string, string> = {
+        "google.gmail.messages.send": execution.ok ? "Gmailを送信しました。" : "Gmailの送信に失敗しました。",
+        "google.calendar.events.create": execution.ok ? "Calendar予定を作成しました。" : "Calendar予定の作成に失敗しました。",
+        "github.issues.create": execution.ok ? "GitHub Issueを作成しました。" : "GitHub Issueの作成に失敗しました。",
+        "github.issue-comments.create": execution.ok ? "GitHubコメントを投稿しました。" : "GitHubコメントの投稿に失敗しました。",
+      };
+      const baseMessage = messages[String(approved["capabilityId"])] ??
+        (execution.ok ? "承認された操作を実行しました。" : "承認された操作の実行に失敗しました。");
+      const conversation = context.env.CONVERSATIONS.get(
+        context.env.CONVERSATIONS.idFromName(conversationId),
+      );
+      const appended = await conversation.fetch("https://conversation.internal/messages/assistant", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ principalId: context.get("ownerPrincipalId"),
+          idempotencyKey: `approval-outcome:${approvalId}`,
+          content: executionCode ? `${baseMessage} (${executionCode})` : baseMessage,
+          providerId: "provider:local-format" }),
+      });
+      conversationRecorded = appended.ok;
+    }
+    if (!recorded) return problem(context.req.raw, 503, "APPROVAL_EXECUTION_RECORD_FAILED");
+    if (!conversationRecorded) return problem(context.req.raw, 503, "CONVERSATION_UNAVAILABLE");
     return execution.ok
-      ? context.json({ ...approved, execution: executionResult })
-      : new Response(JSON.stringify(executionResult), {
+      ? context.json({ ...approved, execution: executionResult, executionStatus })
+      : new Response(JSON.stringify({ ...executionRecord, executionStatus }), {
           status: execution.status,
           headers: { "Content-Type": "application/problem+json" },
         });

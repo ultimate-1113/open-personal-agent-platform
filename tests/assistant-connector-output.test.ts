@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectorSummaryMessages,
   formatConnectorResult,
+  githubRepositoryFullNames,
   inferCalendarRange,
   selectConnectorToolNames,
 } from "../apps/assistant-worker/src/index.js";
@@ -20,6 +21,14 @@ describe("assistant connector output", () => {
       { full_name: "ultimate-1113/open-personal-agent-platform", html_url: "https://github.com/example/repo" },
     ])}`)).toContain("- ultimate-1113/open-personal-agent-platform");
     expect(formatConnectorResult("GitHub result:\n[]")).toContain("該当する項目はありません");
+  });
+
+  it("extracts only fully qualified accessible repository names", () => {
+    expect(githubRepositoryFullNames({ repositories: [
+      { full_name: "ultimate-1113/open-personal-agent-platform" },
+      { full_name: "invalid" },
+      { name: "missing-owner" },
+    ] })).toEqual(["ultimate-1113/open-personal-agent-platform"]);
   });
 
   it("limits a Japanese next-year Calendar request to exactly one year", () => {

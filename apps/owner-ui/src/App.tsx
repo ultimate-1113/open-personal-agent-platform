@@ -284,6 +284,7 @@ export function App() {
       await load();
     } catch (reason) {
       setError(localizedError(reason, t, "errors.approval"));
+      await load();
     } finally {
       setBusy(false);
     }
@@ -651,7 +652,18 @@ export function App() {
                                   item["capabilityId"] ?? item["role"],
                                 t("item.fallback"),
                               )}</strong>
-                              <p>{display(item["value"] ?? item["content"] ?? item["status"] ?? item["outcome"])}</p>
+                              <p>{display(item["value"] ?? item["content"] ?? item["status"] ?? item["outcome"])}
+                                {tab === "approvals" && typeof item["executionStatus"] === "string" &&
+                                  ` · ${t(item["executionStatus"] === "succeeded"
+                                    ? "approvals.executionSucceeded"
+                                    : item["executionStatus"] === "failed"
+                                      ? "approvals.executionFailed"
+                                      : item["executionStatus"] === "unknown"
+                                        ? "approvals.executionUnknown"
+                                        : "approvals.executionPending")}`}
+                              </p>
+                              {tab === "approvals" && typeof item["executionErrorCode"] === "string" &&
+                                <small>{item["executionErrorCode"]}</small>}
                               {tab === "approvals" && item["status"] === "pending" &&
                                 item["capabilityId"] === "model.connector-results.send" && (() => {
                                   const approvalId = display(item["approvalId"]);

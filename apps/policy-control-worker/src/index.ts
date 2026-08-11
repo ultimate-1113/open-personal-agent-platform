@@ -53,6 +53,9 @@ type ApprovalRow = {
   request_json: string | null;
   task_id: string | null;
   gatekeeper_id: string | null;
+  execution_status: string | null;
+  execution_error_code: string | null;
+  executed_at: string | null;
 };
 
 type ProviderSettingRow = {
@@ -239,6 +242,9 @@ const approvalJson = (row: ApprovalRow) => ({
   createdAt: row.created_at,
   expiresAt: row.expires_at,
   ...(row.decided_at ? { decidedAt: row.decided_at } : {}),
+  ...(row.execution_status ? { executionStatus: row.execution_status } : {}),
+  ...(row.execution_error_code ? { executionErrorCode: row.execution_error_code } : {}),
+  ...(row.executed_at ? { executedAt: row.executed_at } : {}),
   ...(row.capability_id === "model.connector-results.send" && row.request_json
     ? { executionRequest: JSON.parse(row.request_json) as JsonValue }
     : {}),
@@ -254,7 +260,8 @@ async function listApprovals(request: Request, env: Bindings): Promise<Response>
   const result = await env.CONTROL_DB.prepare(
     `SELECT approval_id, principal_id, capability_id, request_digest, preview_json,
             status, created_at, expires_at, decided_at, decision_idempotency_key,
-            request_json, task_id, gatekeeper_id
+            request_json, task_id, gatekeeper_id, execution_status,
+            execution_error_code, executed_at
      FROM approvals WHERE deployment_id = ? AND principal_id = ?
      ORDER BY created_at DESC LIMIT 100`,
   ).bind(deploymentId, principalId).all<ApprovalRow>();
@@ -355,7 +362,8 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
   const current = await env.CONTROL_DB.prepare(
     `SELECT approval_id, principal_id, capability_id, request_digest, preview_json,
             status, created_at, expires_at, decided_at, decision_idempotency_key,
-            request_json, task_id, gatekeeper_id
+            request_json, task_id, gatekeeper_id, execution_status,
+            execution_error_code, executed_at
      FROM approvals WHERE deployment_id = ? AND approval_id = ? AND principal_id = ?`,
   ).bind(input["deploymentId"], input["approvalId"], input["principalId"]).first<ApprovalRow>();
   if (!current) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
@@ -373,10 +381,12 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
   }
   const now = new Date().toISOString();
   const result = await env.CONTROL_DB.prepare(
-    `UPDATE approvals SET status = ?, decided_at = ?, decision_idempotency_key = ?
+    `UPDATE approvals SET status = ?, decided_at = ?, decision_idempotency_key = ?,
+       execution_status = ?
      WHERE deployment_id = ? AND approval_id = ? AND principal_id = ? AND status = 'pending'`,
   ).bind(
-    input["decision"], now, input["idempotencyKey"], input["deploymentId"],
+    input["decision"], now, input["idempotencyKey"],
+    input["decision"] === "approved" ? "pending" : null, input["deploymentId"],
     input["approvalId"], input["principalId"],
   ).run();
   if (result.meta.changes !== 1) {
@@ -396,6 +406,7 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
     status: input["decision"],
     decided_at: now,
     decision_idempotency_key: String(input["idempotencyKey"]),
+    execution_status: input["decision"] === "approved" ? "pending" : null,
   });
   if (input["decision"] !== "approved") {
     return Response.json(current.capability_id === "model.connector-results.send" && current.request_json
@@ -423,6 +434,43 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
     approvalId: current.approval_id,
   }, privateKey);
   return Response.json({ ...decided, executionLease, executionRequest: requestValue });
+}
+
+async function recordApprovalExecution(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" || typeof input["principalId"] !== "string" ||
+    typeof input["approvalId"] !== "string" ||
+    (input["executionStatus"] !== "succeeded" && input["executionStatus"] !== "failed" &&
+      input["executionStatus"] !== "unknown") || typeof input["requestId"] !== "string" ||
+    (input["errorCode"] !== undefined && typeof input["errorCode"] !== "string")) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  const updated = await env.CONTROL_DB.prepare(
+    `UPDATE approvals SET execution_status = ?, execution_error_code = ?, executed_at = ?
+     WHERE deployment_id = ? AND approval_id = ? AND principal_id = ? AND status = 'approved'
+       AND execution_status = 'pending'`,
+  ).bind(input["executionStatus"], input["errorCode"] ?? null, now,
+    input["deploymentId"], input["approvalId"], input["principalId"]).run();
+  if (updated.meta.changes !== 1) {
+    return Response.json({ code: "APPROVAL_EXECUTION_NOT_PENDING" }, { status: 409 });
+  }
+  const audited = await audit(env, {
+    deploymentId: input["deploymentId"], principalId: input["principalId"],
+    eventType: "approval.execution.completed",
+    outcome: input["executionStatus"] === "succeeded" ? "success" :
+      input["executionStatus"] === "unknown" ? "unknown" : "failure",
+    requestId: input["requestId"],
+    metadata: { approvalId: input["approvalId"], executionStatus: input["executionStatus"],
+      ...(typeof input["errorCode"] === "string" ? { errorCode: input["errorCode"] } : {}) },
+  });
+  return audited
+    ? Response.json({ executionStatus: input["executionStatus"], executedAt: now })
+    : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
 }
 
 async function listAudit(request: Request, env: Bindings): Promise<Response> {
@@ -648,6 +696,9 @@ export default {
     }
     if (request.method === "POST" && url.pathname === "/internal/v1/approvals/decision") {
       return decideApproval(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/approvals/execution") {
+      return recordApprovalExecution(request, env);
     }
     if (request.method === "GET" && url.pathname === "/internal/v1/audit") {
       return listAudit(request, env);
