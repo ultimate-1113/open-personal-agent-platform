@@ -18,6 +18,7 @@ import {
   WorkersAiProvider,
   estimateWorkersAiNeurons,
   type ModelRequest,
+  type ModelResponse,
   type ModelToolCall,
   type ModelToolDefinition,
   type WorkersAiBinding,
@@ -241,6 +242,91 @@ export const connectorSummaryMessages = (
     content: `Owner question:\n${question}\n\n<connector_results>\n${connectorResult}\n</connector_results>`,
   },
 ];
+
+const GOOGLE_TOOL_NAMES = new Set([
+  "google_gmail_search",
+  "google_calendar_list_events",
+  "google_drive_search",
+  "google_calendar_create_event",
+  "google_gmail_send",
+]);
+
+const GITHUB_TOOL_NAMES = new Set([
+  "github_repositories_list",
+  "github_inbox_list",
+  "github_issues_search",
+  "github_code_search",
+  "github_pulls_list",
+  "github_issue_comments_list",
+  "github_issue_create",
+  "github_issue_comment_create",
+]);
+
+const CHANGEABLE_READ_TOOL_NAMES = new Set([
+  "google_gmail_search",
+  "google_calendar_list_events",
+  "google_drive_search",
+  "github_repositories_list",
+  "github_inbox_list",
+  "github_issues_search",
+  "github_code_search",
+]);
+
+export const selectConnectorToolNames = (prompt: string): string[] => {
+  const text = prompt.normalize("NFKC").toLocaleLowerCase();
+  const isCreate = /(?:作成|追加|登録|入れて|予定を入|create|add)/u.test(text);
+  if (/(?:gmail|メール|email)/u.test(text)) {
+    return /(?:送信|送って|送る|メールして|send)/u.test(text)
+      ? ["google_gmail_send"]
+      : ["google_gmail_search"];
+  }
+  if (/(?:calendar|カレンダー|予定|スケジュール)/u.test(text)) {
+    return isCreate ? ["google_calendar_create_event"] : ["google_calendar_list_events"];
+  }
+  if (/(?:google\s*drive|ドライブ|drive)/u.test(text)) return ["google_drive_search"];
+  if (/(?:github|repository|リポジトリ|issue|pull request|プルリク|コード)/u.test(text)) {
+    if (/(?:コメント|返信|comment|reply)/u.test(text)) {
+      return isCreate || /(?:投稿|書いて|post)/u.test(text)
+        ? ["github_issue_comment_create"]
+        : ["github_issue_comments_list"];
+    }
+    if (/(?:issue|イシュー)/u.test(text) && isCreate) return ["github_issue_create"];
+    if (/(?:コード|code)/u.test(text)) return ["github_code_search"];
+    if (/(?:pull request|プルリク|\bpr\b)/u.test(text)) return ["github_pulls_list"];
+    if (/(?:通知|受信箱|購読|inbox|notification|subscribed)/u.test(text)) return ["github_inbox_list"];
+    if (/(?:issue|イシュー)/u.test(text)) return ["github_issues_search"];
+    return ["github_repositories_list"];
+  }
+  return [];
+};
+
+const requestedItemCount = (prompt: string, fallback: number, maximum: number): number => {
+  const match = prompt.normalize("NFKC").match(/(\d{1,2})\s*(?:件|通|items?|messages?)/iu);
+  if (!match?.[1]) return fallback;
+  return Math.min(Math.max(Number(match[1]), 1), maximum);
+};
+
+const gmailMessageDetail = (value: unknown): Record<string, string> => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  const payload = typeof record["payload"] === "object" && record["payload"] !== null &&
+    !Array.isArray(record["payload"])
+    ? record["payload"] as Record<string, unknown> : {};
+  const headers: unknown[] = Array.isArray(payload["headers"])
+    ? payload["headers"] as unknown[] : [];
+  const header = (name: string): string => {
+    const found = headers.find((item) => typeof item === "object" && item !== null &&
+      !Array.isArray(item) && (item as Record<string, unknown>)["name"] === name);
+    const result = found && (found as Record<string, unknown>)["value"];
+    return typeof result === "string" ? result : "";
+  };
+  return {
+    from: header("From"),
+    subject: header("Subject"),
+    date: header("Date"),
+    snippet: typeof record["snippet"] === "string" ? record["snippet"] : "",
+  };
+};
 
 const googleConnectionCache = new Map<string, {
   expiresAt: number;
@@ -830,10 +916,21 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (call.name === "google_gmail_search") {
       const query = call.arguments["query"];
       if (typeof query !== "string") return "Gmail検索条件が不正です。";
+      const count = requestedItemCount(prompt, 3, 5);
       const value = await googleFetch("/internal/v1/google/gmail/search", {
-        query, maxResults: 10,
+        query, maxResults: count,
       });
-      return `Gmail検索結果（モデルへ再送していません）:\n${JSON.stringify(value, null, 2)}`;
+      const messages = typeof value === "object" && value !== null && !Array.isArray(value) &&
+        Array.isArray((value as Record<string, unknown>)["messages"])
+        ? (value as Record<string, unknown>)["messages"] as unknown[] : [];
+      const details = await Promise.all(messages.slice(0, count).flatMap((message) => {
+        if (typeof message !== "object" || message === null || Array.isArray(message) ||
+          typeof (message as Record<string, unknown>)["messageId"] !== "string") return [];
+        return [googleFetch("/internal/v1/google/gmail/messages/get", {
+          messageId: (message as Record<string, unknown>)["messageId"] as string,
+        }).then(gmailMessageDetail)];
+      }));
+      return `Gmail検索結果（モデルへ再送していません）:\n${JSON.stringify({ messages: details }, null, 2)}`;
     }
     if (call.name === "google_calendar_list_events") {
       const inferred = inferCalendarRange(prompt, currentDate);
@@ -859,7 +956,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       const subject = call.arguments["subject"];
       const body = call.arguments["body"];
       if (typeof to !== "string" || typeof subject !== "string" || typeof body !== "string") {
-        return "Gmail送信内容が不正です。";
+        return "メールを送信するには、宛先、件名、本文を指定してください。";
       }
       const approval = await requestExternalWriteApproval(context, "google.gmail.messages.send", {
         connectionId, to, subject, body,
@@ -877,7 +974,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       const start = call.arguments["start"];
       const end = call.arguments["end"];
       if (typeof summary !== "string" || typeof start !== "string" || typeof end !== "string") {
-        return "Calendar予定の内容が不正です。";
+        return "予定を作成するには、件名、開始日時、終了日時を指定してください。";
       }
       const operation: Record<string, JsonValue> = { connectionId, summary, start, end };
       if (typeof call.arguments["timeZone"] === "string") operation["timeZone"] = call.arguments["timeZone"];
@@ -966,7 +1063,10 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     }
     if (call.name === "github_issue_create") {
       const title = call.arguments["title"];
-      if (typeof repository !== "string" || typeof title !== "string" || typeof body !== "string") return "Issue作成内容が不正です。";
+      if (typeof repository !== "string" || /^(?:対象|target|owner\/repo|repository)/iu.test(repository) ||
+        typeof title !== "string" || typeof body !== "string") {
+        return "Issueを作成するには、Repository（owner/name）、タイトル、本文を指定してください。";
+      }
       const approval = await requestExternalWriteApproval(context, "github.issues.create",
         { connectionId, repository, title, body },
         { destination: repository, operation: "Create GitHub issue", title, body }, "gatekeeper:github-personal");
@@ -976,7 +1076,10 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       return `GitHub Issue作成は承認待ちです。${typeof id === "string" ? ` (${id})` : ""}`;
     }
     if (call.name === "github_issue_comment_create") {
-      if (typeof repository !== "string" || typeof issueNumber !== "number" || typeof body !== "string") return "コメント内容が不正です。";
+      if (typeof repository !== "string" || /^(?:対象|target|owner\/repo|repository)/iu.test(repository) ||
+        typeof issueNumber !== "number" || typeof body !== "string") {
+        return "コメントを投稿するには、Repository（owner/name）、Issue番号、本文を指定してください。";
+      }
       const approval = await requestExternalWriteApproval(context, "github.issue-comments.create",
         { connectionId, repository, issueNumber, body },
         { destination: `${repository}#${issueNumber}`, operation: "Post GitHub comment", body }, "gatekeeper:github-personal");
@@ -1256,16 +1359,47 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       activeGoogleConnectionsForAgent(context.env).catch(() => []),
       activeGitHubConnectionsForAgent(context.env).catch(() => []),
     ]);
-    const tools = [
+    const availableTools = [
       ...(googleConnections.length > 0 ? googleAgentTools(googleConnections) : []),
       ...(githubConnections.length > 0 ? githubAgentTools(githubConnections) : []),
     ];
+    const intendedToolNames = selectConnectorToolNames(content);
+    const tools = availableTools.filter((tool) => intendedToolNames.includes(tool.name));
+    const needsGoogle = intendedToolNames.some((name) => GOOGLE_TOOL_NAMES.has(name));
+    const needsGitHub = intendedToolNames.some((name) => GITHUB_TOOL_NAMES.has(name));
+    const unavailableConnectorMessage = needsGoogle && googleConnections.length === 0
+      ? "Google接続が無効です。接続画面でGoogleアカウントを接続してから再試行してください。"
+      : needsGitHub && githubConnections.length === 0
+        ? "GitHub接続が無効です。接続画面でGitHubアカウントを接続してから再試行してください。"
+        : undefined;
+    const deterministicToolName = intendedToolNames.length === 1 && [
+      "google_gmail_search",
+      "google_calendar_list_events",
+      "github_repositories_list",
+      "github_inbox_list",
+    ].includes(intendedToolNames[0] ?? "")
+      ? intendedToolNames[0] : undefined;
+    const deterministicConnection = deterministicToolName?.startsWith("google_")
+      ? (googleConnections.length === 1 ? googleConnections[0] : undefined)
+      : deterministicToolName?.startsWith("github_")
+        ? (githubConnections.length === 1 ? githubConnections[0] : undefined)
+        : undefined;
+    const deterministicToolCall: ModelToolCall | undefined = deterministicToolName && deterministicConnection
+      ? {
+          name: deterministicToolName,
+          arguments: {
+            connectionId: deterministicConnection.connectionId,
+            ...(deterministicToolName === "google_gmail_search" ? { query: "" } : {}),
+          },
+        }
+      : undefined;
+    const now = dependencies.now?.() ?? new Date();
     const modelRequest: ModelRequest = {
       messages: [
         ...(tools.length > 0
           ? [{
               role: "system" as const,
-              content: "You are the owner's personal agent. Use available Google and GitHub tools when needed. Use github_repositories_list for questions about accessible repositories; github_inbox_list is only for subscribed issue and pull-request updates. Never claim a write completed when it only requested approval.",
+              content: `You are the owner's personal agent. Current UTC time is ${now.toISOString()}. The available tools have already been restricted to the owner's detected intent. If the request needs external data or an external action, use only the provided tool and never substitute another tool. If a required write parameter is missing or is a placeholder such as 'target repository', ask one concise clarification question without calling a tool. Never claim a write completed when it only requested approval.`,
             }]
           : []),
         { role: "user", content },
@@ -1283,7 +1417,6 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       audience: "owner",
       ...(tools.length > 0 ? { tools } : {}),
     };
-    const now = dependencies.now?.() ?? new Date();
     const reservation = await reserveOwnerOperation({
       bindings: context.env,
       principalId,
@@ -1294,7 +1427,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (reservation === "conflict") return problem(context.req.raw, 409, "IDEMPOTENCY_CONFLICT");
     if (reservation === "unavailable") return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
     let aiReservation: AiReservation | undefined;
-    if (activeProviderId === "provider:workers-ai") {
+    if (activeProviderId === "provider:workers-ai" && !unavailableConnectorMessage && !deterministicToolCall) {
       let policy: CloudCostPolicy;
       try {
         policy = await costPolicies(context.env).get();
@@ -1324,9 +1457,13 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       }
       aiReservation = ai;
     }
-    let generated;
+    let generated: ModelResponse;
     try {
-      generated = await router.generate(modelRequest);
+      generated = unavailableConnectorMessage
+        ? { providerId: "provider:local-format", text: unavailableConnectorMessage }
+        : deterministicToolCall
+          ? { providerId: "provider:intent-router", text: "", toolCalls: [deterministicToolCall] }
+        : await router.generate(modelRequest);
     } catch (error) {
       await releaseReservation(reservation, context.env.DEPLOYMENT_ID);
       if (aiReservation) {
@@ -1407,7 +1544,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
             { conversationId, resultId, destinationId: activeProviderId },
             { destination: "Workers AI", operation: "Send connector results to model",
               connectorResultBytes: new TextEncoder().encode(modelToolContent).byteLength,
-              resultDigest: await sha256Hex(modelToolContent), toolIds },
+              resultDigest: await sha256Hex(modelToolContent), toolIds,
+              availableToolIds: availableTools.map((tool) => tool.name)
+                .filter((name) => CHANGEABLE_READ_TOOL_NAMES.has(name)) },
             "gatekeeper:model-router");
           const approvalValue: unknown = await approval.json().catch(() => ({}));
           if (!approval.ok) return new Response(JSON.stringify(approvalValue), {
@@ -1638,6 +1777,111 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     url.searchParams.set("principalId", context.get("ownerPrincipalId"));
     const response = await context.env.CONTROL.fetch(url);
     return new Response(response.body, response);
+  });
+
+  app.patch("/v1/approvals/:approvalId/tool", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const value: unknown = await context.req.json().catch(() => null);
+    const toolId = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["toolId"] : undefined;
+    if (typeof toolId !== "string" || !CHANGEABLE_READ_TOOL_NAMES.has(toolId)) {
+      return problem(context.req.raw, 400, "INVALID_TOOL_SELECTION");
+    }
+    const principalId = context.get("ownerPrincipalId");
+    const approvalsUrl = new URL("https://control.internal/internal/v1/approvals");
+    approvalsUrl.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    approvalsUrl.searchParams.set("principalId", principalId);
+    const approvalsResponse = await context.env.CONTROL.fetch(approvalsUrl);
+    const approvalsValue: unknown = await approvalsResponse.json().catch(() => ({}));
+    const approvals = typeof approvalsValue === "object" && approvalsValue !== null &&
+      !Array.isArray(approvalsValue) && Array.isArray((approvalsValue as Record<string, unknown>)["approvals"])
+      ? (approvalsValue as Record<string, unknown>)["approvals"] as unknown[] : [];
+    const approval = approvals.find((item) => typeof item === "object" && item !== null &&
+      !Array.isArray(item) && (item as Record<string, unknown>)["approvalId"] === context.req.param("approvalId"));
+    if (typeof approval !== "object" || approval === null || Array.isArray(approval)) {
+      return problem(context.req.raw, 404, "APPROVAL_NOT_FOUND");
+    }
+    const record = approval as Record<string, unknown>;
+    const preview = typeof record["preview"] === "object" && record["preview"] !== null &&
+      !Array.isArray(record["preview"]) ? record["preview"] as Record<string, unknown> : {};
+    const allowedTools = Array.isArray(preview["availableToolIds"])
+      ? preview["availableToolIds"].filter((item): item is string => typeof item === "string") : [];
+    const operation = typeof record["executionRequest"] === "object" && record["executionRequest"] !== null &&
+      !Array.isArray(record["executionRequest"])
+      ? record["executionRequest"] as Record<string, unknown> : {};
+    const conversationId = operation["conversationId"];
+    const oldResultId = operation["resultId"];
+    if (record["status"] !== "pending" || record["capabilityId"] !== "model.connector-results.send" ||
+      !allowedTools.includes(toolId) || typeof conversationId !== "string" ||
+      !/^conversation:[a-f0-9]{64}$/u.test(conversationId) || typeof oldResultId !== "string") {
+      return problem(context.req.raw, 409, "APPROVAL_TOOL_CHANGE_DENIED");
+    }
+    const conversation = context.env.CONVERSATIONS.get(
+      context.env.CONVERSATIONS.idFromName(conversationId),
+    );
+    const pendingResponse = await conversation.fetch("https://conversation.internal/connector-results/read", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ principalId, resultId: oldResultId }),
+    });
+    const pendingValue: unknown = await pendingResponse.json().catch(() => ({}));
+    if (!pendingResponse.ok || typeof pendingValue !== "object" || pendingValue === null ||
+      Array.isArray(pendingValue) || typeof (pendingValue as Record<string, unknown>)["question"] !== "string") {
+      return problem(context.req.raw, 409, "CONNECTOR_RESULT_EXPIRED");
+    }
+    const question = (pendingValue as Record<string, unknown>)["question"] as string;
+    const [googleConnections, githubConnections] = await Promise.all([
+      activeGoogleConnectionsForAgent(context.env).catch(() => []),
+      activeGitHubConnectionsForAgent(context.env).catch(() => []),
+    ]);
+    const selectedConnections = toolId.startsWith("google_") ? googleConnections : githubConnections;
+    if (selectedConnections.length !== 1) {
+      return problem(context.req.raw, 409, "CONNECTION_SELECTION_REQUIRED");
+    }
+    const call: ModelToolCall = {
+      name: toolId,
+      arguments: {
+        connectionId: selectedConnections[0]?.connectionId ?? "",
+        ...(toolId === "google_gmail_search" ? { query: "" } : {}),
+        ...(toolId === "github_issues_search" || toolId === "github_code_search"
+          ? { query: question } : {}),
+      },
+    };
+    let rawResult: string;
+    try {
+      rawResult = toolId.startsWith("google_")
+        ? await executeGoogleAgentTool(context, call, googleConnections, question,
+            dependencies.now?.() ?? new Date())
+        : await executeGitHubAgentTool(context, call, githubConnections);
+    } catch {
+      return problem(context.req.raw, 503, "CONNECTOR_TOOL_FAILED");
+    }
+    const modelToolContent = rawResult.length <= 65_536
+      ? rawResult : `${rawResult.slice(0, 65_536)}\n[Connector result truncated]`;
+    const resultId = `connector-result:${crypto.randomUUID()}`;
+    const stored = await conversation.fetch("https://conversation.internal/connector-results", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ principalId, resultId, question,
+        result: modelToolContent, display: formatConnectorResult(rawResult) }),
+    });
+    if (!stored.ok) return problem(context.req.raw, 503, "CONNECTOR_RESULT_STORAGE_UNAVAILABLE");
+    const rejected = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/approvals/decision", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID, principalId,
+          approvalId: context.req.param("approvalId"), decision: "rejected",
+          idempotencyKey: `tool-change:${idempotencyKey}`,
+          requestId: context.req.header("cf-ray") ?? crypto.randomUUID() }),
+      });
+    if (!rejected.ok) return problem(context.req.raw, 409, "APPROVAL_TOOL_CHANGE_CONFLICT");
+    const replacement = await requestExternalWriteApproval(context,
+      "model.connector-results.send",
+      { conversationId, resultId, destinationId: "provider:workers-ai" },
+      { destination: "Workers AI", operation: "Send connector results to model",
+        connectorResultBytes: new TextEncoder().encode(modelToolContent).byteLength,
+        resultDigest: await sha256Hex(modelToolContent), toolIds: [toolId],
+        availableToolIds: allowedTools }, "gatekeeper:model-router");
+    return new Response(replacement.body, replacement);
   });
 
   app.post("/v1/approvals/:approvalId", async (context) => {

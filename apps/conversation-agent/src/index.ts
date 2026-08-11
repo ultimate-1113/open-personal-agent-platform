@@ -257,6 +257,16 @@ export class ConversationAgent {
         ? this.#consumeConnectorResult(input["principalId"], input["resultId"])
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
+    if (request.method === "POST" && path === "/connector-results/read") {
+      const value: unknown = await request.json().catch(() => null);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+      }
+      const input = value as Record<string, unknown>;
+      return typeof input["principalId"] === "string" && typeof input["resultId"] === "string"
+        ? this.#readConnectorResult(input["principalId"], input["resultId"])
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
     if (request.method === "POST" && path === "/messages/assistant") {
       const value: unknown = await request.json().catch(() => null);
       return isAppendAssistantInput(value)
@@ -491,6 +501,13 @@ export class ConversationAgent {
   }
 
   #consumeConnectorResult(principalId: string, resultId: string): Response {
+    const response = this.#readConnectorResult(principalId, resultId);
+    if (!response.ok) return response;
+    this.#sql.exec("DELETE FROM pending_connector_results WHERE result_id = ?", resultId);
+    return response;
+  }
+
+  #readConnectorResult(principalId: string, resultId: string): Response {
     const row = firstRow(this.#sql.exec<{
       question: string; result: string; display: string; expires_at: string;
     }>(`SELECT question, result, display, expires_at FROM pending_connector_results
@@ -499,7 +516,6 @@ export class ConversationAgent {
       this.#sql.exec("DELETE FROM pending_connector_results WHERE result_id = ?", resultId);
       return Response.json({ code: "CONNECTOR_RESULT_EXPIRED" }, { status: 410 });
     }
-    this.#sql.exec("DELETE FROM pending_connector_results WHERE result_id = ?", resultId);
     return Response.json({ question: row.question, result: row.result, display: row.display });
   }
 

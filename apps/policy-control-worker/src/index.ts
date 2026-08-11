@@ -239,6 +239,9 @@ const approvalJson = (row: ApprovalRow) => ({
   createdAt: row.created_at,
   expiresAt: row.expires_at,
   ...(row.decided_at ? { decidedAt: row.decided_at } : {}),
+  ...(row.capability_id === "model.connector-results.send" && row.request_json
+    ? { executionRequest: JSON.parse(row.request_json) as JsonValue }
+    : {}),
 });
 
 async function listApprovals(request: Request, env: Bindings): Promise<Response> {

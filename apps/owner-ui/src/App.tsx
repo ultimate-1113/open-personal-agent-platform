@@ -4,6 +4,8 @@ import type { MessageKey } from "./locales/en.js";
 import { useTheme } from "./theme.js";
 
 type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget" | "connections";
+type ApprovalFilter = "pending" | "approved" | "all";
+type ConnectorApprovalMode = "manual" | "open" | "auto-read";
 type ApiRecord = Record<string, unknown>;
 
 const tabs: readonly { id: Tab; labelKey: MessageKey }[] = [
@@ -65,6 +67,11 @@ export function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [editingItem, setEditingItem] = useState<ApiRecord>();
+  const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
+  const [connectorApprovalMode, setConnectorApprovalMode] = useState<ConnectorApprovalMode>("manual");
+  const [workersAiActive, setWorkersAiActive] = useState(false);
+  const [approvalToolQueries, setApprovalToolQueries] = useState<Record<string, string>>({});
+  const [approvalToolSelections, setApprovalToolSelections] = useState<Record<string, string>>({});
   const loadSequence = useRef(0);
   const conversationList = useRef<HTMLElement>(null);
   const request = useCallback(
@@ -115,6 +122,13 @@ export function App() {
   }, [load]);
 
   useEffect(() => {
+    void request("/v1/settings/providers").then((settings) => {
+      setWorkersAiActive(rows(settings["providers"]).some((provider) =>
+        provider["providerId"] === "provider:workers-ai" && provider["enabled"] === true));
+    }).catch(() => setWorkersAiActive(false));
+  }, [request]);
+
+  useEffect(() => {
     if (tab !== "conversation") return;
     const element = conversationList.current;
     if (element) element.scrollTop = element.scrollHeight;
@@ -128,6 +142,20 @@ export function App() {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    const optimisticMessageId = tab === "conversation" ? `optimistic:${crypto.randomUUID()}` : undefined;
+    if (optimisticMessageId) {
+      const content = formText(form, "content");
+      setData((current) => ({
+        ...current,
+        messages: [...rows(current["messages"]), {
+          messageId: optimisticMessageId,
+          role: "user",
+          content,
+          createdAt: new Date().toISOString(),
+        }],
+      }));
+      formElement.reset();
+    }
     setBusy(true);
     setError("");
     try {
@@ -147,6 +175,22 @@ export function App() {
           const id = display(created["conversationId"]);
           setConversationId(id);
           localStorage.setItem("opap.conversationId", id);
+        }
+        const assistant = typeof created["assistant"] === "object" && created["assistant"] !== null
+          ? created["assistant"] as ApiRecord : {};
+        const approvalMatch = display(assistant["content"]).match(
+          /Connector結果のクラウド送信は承認待ちです[\s\S]*?\((approval:[0-9a-f-]{36})\)/u,
+        );
+        const approvalId = approvalMatch?.[1];
+        if (workersAiActive && approvalId && connectorApprovalMode === "auto-read") {
+          await request(`/v1/approvals/${encodeURIComponent(approvalId)}`, {
+            method: "POST",
+            headers: { "Idempotency-Key": crypto.randomUUID() },
+            body: JSON.stringify({ decision: "approved" }),
+          });
+        } else if (workersAiActive && approvalId && connectorApprovalMode === "open") {
+          setTab("approvals");
+          return;
         }
       } else if (tab === "tasks") {
         await request("/v1/tasks", {
@@ -212,6 +256,13 @@ export function App() {
       formElement.reset();
       await load();
     } catch (reason) {
+      if (optimisticMessageId) {
+        setData((current) => ({
+          ...current,
+          messages: rows(current["messages"]).filter((message) =>
+            message["messageId"] !== optimisticMessageId),
+        }));
+      }
       setError(localizedError(reason, t, "errors.save"));
     } finally {
       setBusy(false);
@@ -230,6 +281,31 @@ export function App() {
         setTab("conversation");
         return;
       }
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.approval"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changeApprovalTool = async (item: ApiRecord) => {
+    const approvalId = display(item["approvalId"]);
+    const preview = typeof item["preview"] === "object" && item["preview"] !== null
+      ? item["preview"] as ApiRecord : {};
+    const current = Array.isArray(preview["toolIds"]) && typeof preview["toolIds"][0] === "string"
+      ? preview["toolIds"][0] : "";
+    const toolId = approvalToolSelections[approvalId] ?? current;
+    if (!toolId || toolId === current) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/approvals/${encodeURIComponent(approvalId)}/tool`, {
+        method: "PATCH",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ toolId }),
+      });
+      setApprovalToolQueries((values) => ({ ...values, [approvalId]: "" }));
       await load();
     } catch (reason) {
       setError(localizedError(reason, t, "errors.approval"));
@@ -340,7 +416,7 @@ export function App() {
   };
 
 
-  const collection = tab === "tasks"
+  const unfilteredCollection = tab === "tasks"
     ? rows(data["tasks"])
     : tab === "memory"
       ? rows(data["memories"])
@@ -353,6 +429,9 @@ export function App() {
             : tab === "connections"
               ? rows(data["connections"]).filter((connection) => connection["status"] === "active")
             : [];
+  const collection = tab === "approvals" && approvalFilter !== "all"
+    ? unfilteredCollection.filter((approval) => approval["status"] === approvalFilter)
+    : unfilteredCollection;
   const providerRows = rows(data["providers"]);
   const activeProviderId = display(
     providerRows.find((provider) => provider["enabled"] === true)?.["providerId"],
@@ -444,10 +523,31 @@ export function App() {
             }}
           />
           <small className="composer-hint">{t("conversation.keyboardHint")}</small>
-          <button disabled={busy}>
-            {conversationId ? t("conversation.send") : t("conversation.create")}
-          </button>
+          <div className="composer-actions">
+            {workersAiActive && <select
+              value={connectorApprovalMode}
+              aria-label={t("conversation.approvalMode")}
+              onChange={(event) => setConnectorApprovalMode(event.currentTarget.value as ConnectorApprovalMode)}
+            >
+              <option value="manual">{t("conversation.approvalManual")}</option>
+              <option value="open">{t("conversation.approvalOpen")}</option>
+              <option value="auto-read">{t("conversation.approvalAutoRead")}</option>
+            </select>}
+            <button disabled={busy}>
+              {conversationId ? t("conversation.send") : t("conversation.create")}
+            </button>
+          </div>
         </form>}
+      {tab === "approvals" && <div className="filter-bar">
+        <label>{t("approvals.filter")}
+          <select value={approvalFilter}
+            onChange={(event) => setApprovalFilter(event.currentTarget.value as ApprovalFilter)}>
+            <option value="all">{t("approvals.filterAll")}</option>
+            <option value="pending">{t("approvals.filterPending")}</option>
+            <option value="approved">{t("approvals.filterApproved")}</option>
+          </select>
+        </label>
+      </div>}
       {tab === "connections" &&
         <>
           <section className="connection-actions">
@@ -552,6 +652,40 @@ export function App() {
                                 t("item.fallback"),
                               )}</strong>
                               <p>{display(item["value"] ?? item["content"] ?? item["status"] ?? item["outcome"])}</p>
+                              {tab === "approvals" && item["status"] === "pending" &&
+                                item["capabilityId"] === "model.connector-results.send" && (() => {
+                                  const approvalId = display(item["approvalId"]);
+                                  const preview = typeof item["preview"] === "object" && item["preview"] !== null
+                                    ? item["preview"] as ApiRecord : {};
+                                  const available = Array.isArray(preview["availableToolIds"])
+                                    ? preview["availableToolIds"].filter((tool): tool is string => typeof tool === "string")
+                                    : [];
+                                  const current = Array.isArray(preview["toolIds"]) &&
+                                    typeof preview["toolIds"][0] === "string" ? preview["toolIds"][0] : "";
+                                  const query = approvalToolQueries[approvalId] ?? "";
+                                  const visible = available.filter((tool) =>
+                                    tool.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+                                  return available.length > 0 && <div className="approval-tool-picker">
+                                    <input type="search" value={query} placeholder={t("approvals.toolSearch")}
+                                      onChange={(event) => setApprovalToolQueries((values) =>
+                                        ({ ...values, [approvalId]: event.currentTarget.value }))} />
+                                    <select value={approvalToolSelections[approvalId] ?? current}
+                                      aria-label={t("approvals.toolSelection")}
+                                      onChange={(event) => setApprovalToolSelections((values) =>
+                                        ({ ...values, [approvalId]: event.currentTarget.value }))}>
+                                      {!visible.includes(approvalToolSelections[approvalId] ?? current) &&
+                                        <option value={approvalToolSelections[approvalId] ?? current}>
+                                          {approvalToolSelections[approvalId] ?? current}
+                                        </option>}
+                                      {visible.map((tool) => <option key={tool} value={tool}>{tool}</option>)}
+                                    </select>
+                                    <button type="button" className="quiet" disabled={busy ||
+                                      (approvalToolSelections[approvalId] ?? current) === current}
+                                      onClick={() => void changeApprovalTool(item)}>
+                                      {t("approvals.changeTool")}
+                                    </button>
+                                  </div>;
+                                })()}
                               {tab === "approvals" && typeof item["preview"] === "object" &&
                                 item["preview"] !== null &&
                                 <pre className="policy">{JSON.stringify(item["preview"], null, 2)}</pre>}

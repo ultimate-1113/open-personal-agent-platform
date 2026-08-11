@@ -81,6 +81,12 @@ h1 { margin: 3px 0 0; font: 500 clamp(34px, 5vw, 58px)/1 Georgia, serif; letter-
 .composer, .memory-form { display: grid; gap: 12px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 15px; margin-bottom: 24px; }
 .composer textarea, .memory-form textarea { min-height: 110px; }
 .composer-hint { color: var(--text-subtle); font-size: 12px; }
+.composer-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.composer-actions select, .filter-bar select { color: var(--text-strong); background: var(--surface-muted); border: 1px solid var(--border-strong); border-radius: 8px; padding: 9px 11px; }
+.filter-bar { display: flex; justify-content: flex-end; margin-bottom: 14px; }
+.filter-bar label { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 13px; }
+.approval-tool-picker { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(220px, 1fr) auto; gap: 8px; margin-top: 12px; }
+.approval-tool-picker input, .approval-tool-picker select { color: var(--text-strong); background: var(--surface-muted); border: 1px solid var(--border-strong); border-radius: 8px; padding: 9px 11px; }
 .inline-form { display: flex; gap: 10px; margin-bottom: 24px; }
 .memory-form input, input, textarea { width: 100%; color: var(--text-strong); background: var(--surface-muted); border: 1px solid var(--border-strong); border-radius: 9px; padding: 12px; resize: vertical; }
 form button, .actions button { justify-self: end; color: var(--accent-text); background: var(--accent); border: 0; border-radius: 8px; padding: 10px 15px; font-weight: 700; }

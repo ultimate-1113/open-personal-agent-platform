@@ -3,6 +3,7 @@ import {
   connectorSummaryMessages,
   formatConnectorResult,
   inferCalendarRange,
+  selectConnectorToolNames,
 } from "../apps/assistant-worker/src/index.js";
 
 describe("assistant connector output", () => {
@@ -35,5 +36,15 @@ describe("assistant connector output", () => {
     expect(messages[1]?.content).toContain("今後1年の予定は？");
     expect(messages[1]?.content).toContain("Calendar result: Project meeting");
     expect(messages.some((message) => message.role === "tool")).toBe(false);
+  });
+
+  it.each([
+    ["最近のメールを3件教えて", "google_gmail_search"],
+    ["明日15時にテスト予定を作成して", "google_calendar_create_event"],
+    ["今後2年間の予定は？", "google_calendar_list_events"],
+    ["対象RepositoryにテストIssueを作成して", "github_issue_create"],
+    ["GitHubでアクセス可能なリポジトリは？", "github_repositories_list"],
+  ])("routes %s only to %s", (prompt, expected) => {
+    expect(selectConnectorToolNames(prompt)).toEqual([expected]);
   });
 });
