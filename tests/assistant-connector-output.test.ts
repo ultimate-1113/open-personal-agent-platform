@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatConnectorResult, inferCalendarRange } from "../apps/assistant-worker/src/index.js";
+import {
+  connectorSummaryMessages,
+  formatConnectorResult,
+  inferCalendarRange,
+} from "../apps/assistant-worker/src/index.js";
 
 describe("assistant connector output", () => {
   it("formats Calendar data as a readable list instead of exposing JSON", () => {
@@ -22,5 +26,14 @@ describe("assistant connector output", () => {
       timeMin: "2026-08-11T00:00:00.000Z",
       timeMax: "2027-08-11T00:00:00.000Z",
     });
+  });
+
+  it("places approved connector data in a model-visible user message", () => {
+    const messages = connectorSummaryMessages("今後1年の予定は？", "Calendar result: Project meeting");
+    expect(messages).toHaveLength(2);
+    expect(messages[1]?.role).toBe("user");
+    expect(messages[1]?.content).toContain("今後1年の予定は？");
+    expect(messages[1]?.content).toContain("Calendar result: Project meeting");
+    expect(messages.some((message) => message.role === "tool")).toBe(false);
   });
 });
