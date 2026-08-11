@@ -424,3 +424,34 @@ export const usageRecordSchema = z.object({
 });
 
 export type UsageRecord = z.infer<typeof usageRecordSchema>;
+
+export const connectorProviderIdSchema = z.enum(["google", "github", "discord"]);
+export const connectionKindSchema = z.enum(["personal", "delegated-source"]);
+export const connectionStatusSchema = z.enum(["active", "expired", "revoked", "error"]);
+
+export const connectorConnectionSchema = z.object({
+  deploymentId: identifierSchema,
+  connectionId: identifierSchema,
+  kind: connectionKindSchema,
+  providerId: connectorProviderIdSchema,
+  scopes: z.array(z.string().min(1).max(500)).max(50),
+  resourceIds: z.array(z.string().min(1).max(2_000)).max(500),
+  status: connectionStatusSchema,
+  createdAt: ISO_DATE_TIME,
+  updatedAt: ISO_DATE_TIME,
+});
+
+export const oauthCredentialSchema = z.object({
+  accessToken: z.string().min(1),
+  refreshToken: z.string().min(1).optional(),
+  tokenType: z.string().min(1).max(100),
+  scopes: z.array(z.string().min(1).max(500)).max(50),
+  expiresAt: ISO_DATE_TIME.optional(),
+  externalSubject: z.string().min(1).max(500).optional(),
+});
+
+export type ConnectorProviderId = z.infer<typeof connectorProviderIdSchema>;
+export type ConnectionKind = z.infer<typeof connectionKindSchema>;
+export type ConnectionStatus = z.infer<typeof connectionStatusSchema>;
+export type ConnectorConnection = z.infer<typeof connectorConnectionSchema>;
+export type OAuthCredential = z.infer<typeof oauthCredentialSchema>;

@@ -92,6 +92,7 @@ See [resource budgets](docs/en/operations/resource-budgets.md).
 - [Data handling](docs/en/security/data-handling.md)
 - [Identity configuration](docs/en/operations/identity-configuration.md)
 - [Owner surface](docs/en/operations/owner-surface.md)
+- [Phase 3 connectors](docs/en/operations/phase-3-connectors.md)
 - [Localization](docs/en/contributing/localization.md)
 
 ## Security and license

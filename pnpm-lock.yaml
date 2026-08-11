@@ -233,6 +233,12 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
+  packages/oauth-core:
+    dependencies:
+      '@opap/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/persistence:
     dependencies:
       '@opap/contracts':

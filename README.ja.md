@@ -92,6 +92,7 @@ pnpm check
 - [データ処理方針](docs/ja/security/data-handling.md)
 - [Identity設定](docs/ja/operations/identity-configuration.md)
 - [Owner操作面](docs/ja/operations/owner-surface.md)
+- [Phase 3 Connector](docs/ja/operations/phase-3-connectors.md)
 - [多言語対応](docs/ja/contributing/localization.md)
 
 ## セキュリティとライセンス
