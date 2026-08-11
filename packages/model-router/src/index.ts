@@ -6,12 +6,23 @@ export type ProviderHealth = "healthy" | "degraded" | "unavailable";
 export type ModelProviderDescriptor = {
   id: string;
   location: ProviderLocation;
-  capabilities: readonly ("generate" | "embed" | "transcribe")[];
+  capabilities: readonly ("generate" | "embed" | "transcribe" | "tools")[];
   retainsInputs: boolean;
   trainsOnInputs: boolean;
   region?: string;
   estimatedInputCostPerMillion?: number;
   estimatedOutputCostPerMillion?: number;
+};
+
+export type ModelToolDefinition = {
+  name: string;
+  description: string;
+  parameters: Readonly<Record<string, JsonValue>>;
+};
+
+export type ModelToolCall = {
+  name: string;
+  arguments: Readonly<Record<string, JsonValue>>;
 };
 
 export type ModelRequest = {
@@ -24,6 +35,7 @@ export type ModelRequest = {
   taskId?: string;
   audience?: "owner" | "public" | "delegated";
   maxOutputTokens?: number;
+  tools?: readonly ModelToolDefinition[];
 };
 
 export type ModelResponse = {
@@ -31,6 +43,7 @@ export type ModelResponse = {
   text: string;
   usage?: { inputTokens: number; outputTokens: number };
   raw?: JsonValue;
+  toolCalls?: readonly ModelToolCall[];
 };
 
 export interface ModelProvider {
@@ -60,7 +73,7 @@ export function estimateWorkersAiNeurons(
   const inputTokens = request.messages.reduce(
     (total, message) => total + estimateTextTokens(message.content) + 4,
     0,
-  );
+  ) + (request.tools ? estimateTextTokens(JSON.stringify(request.tools)) : 0);
   const outputTokens = outputText === undefined
     ? resolveMaxOutputTokens(request)
     : Math.min(resolveMaxOutputTokens(request), estimateTextTokens(outputText));
@@ -268,7 +281,12 @@ export class MockLocalProvider extends MockModelProvider {
 export type WorkersAiBinding = {
   run(
     model: string,
-    input: { messages: ModelRequest["messages"]; max_tokens: number },
+    input: {
+      messages: ModelRequest["messages"];
+      max_tokens: number;
+      tools?: readonly ModelToolDefinition[];
+      tool_choice?: "auto";
+    },
     options?: {
       gateway?: {
         id: string;
@@ -283,7 +301,7 @@ export class WorkersAiProvider implements ModelProvider {
   readonly descriptor: ModelProviderDescriptor = {
     id: "provider:workers-ai",
     location: "cloud",
-    capabilities: ["generate"],
+    capabilities: ["generate", "tools"],
     retainsInputs: false,
     trainsOnInputs: false,
   };
@@ -303,7 +321,13 @@ export class WorkersAiProvider implements ModelProvider {
     try {
       result = await this.binding.run(
         this.model,
-        { messages: request.messages, max_tokens: resolveMaxOutputTokens(request) },
+        {
+          messages: request.messages,
+          max_tokens: resolveMaxOutputTokens(request),
+          ...(request.tools?.length
+            ? { tools: request.tools, tool_choice: "auto" as const }
+            : {}),
+        },
         {
           gateway: {
             id: this.gatewayId,
@@ -346,10 +370,32 @@ export class WorkersAiProvider implements ModelProvider {
     const openAiContent = typeof message === "object" && message !== null
       ? (message as Record<string, unknown>)["content"]
       : undefined;
+    const toolCallsValue = resultRecord["tool_calls"] ??
+      (typeof message === "object" && message !== null
+        ? (message as Record<string, unknown>)["tool_calls"]
+        : undefined);
+    const toolCalls = Array.isArray(toolCallsValue)
+      ? toolCallsValue.flatMap((item): ModelToolCall[] => {
+          if (typeof item !== "object" || item === null) return [];
+          const row = item as Record<string, unknown>;
+          const functionValue = typeof row["function"] === "object" && row["function"] !== null
+            ? row["function"] as Record<string, unknown>
+            : row;
+          const name = functionValue["name"];
+          let args: unknown = functionValue["arguments"];
+          if (typeof args === "string") {
+            try { args = JSON.parse(args) as unknown; } catch { return []; }
+          }
+          return typeof name === "string" && typeof args === "object" && args !== null &&
+            !Array.isArray(args)
+            ? [{ name, arguments: args as Record<string, JsonValue> }]
+            : [];
+        })
+      : [];
     const text = typeof legacyResponse === "string"
       ? legacyResponse
-      : openAiContent;
-    if (typeof text !== "string") {
+      : typeof openAiContent === "string" ? openAiContent : "";
+    if (!text && toolCalls.length === 0) {
       throw new ModelRoutingError("MODEL_PROVIDER_FAILED", "Workers AI response is invalid");
     }
     const usage = resultRecord["usage"];
@@ -361,6 +407,7 @@ export class WorkersAiProvider implements ModelProvider {
     return {
       providerId: this.descriptor.id,
       text,
+      ...(toolCalls.length ? { toolCalls } : {}),
       ...(typeof inputTokens === "number" && typeof outputTokens === "number"
         ? { usage: { inputTokens, outputTokens } }
         : {}),

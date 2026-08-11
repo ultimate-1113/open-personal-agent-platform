@@ -183,6 +183,26 @@ describe("ModelRouter", () => {
     });
   });
 
+  it("returns structured Gemma tool calls", async () => {
+    const provider = new WorkersAiProvider({
+      run: () => Promise.resolve({
+        tool_calls: [{ name: "google_gmail_search", arguments: { query: "is:unread" } }],
+      }),
+    }, "@cf/google/gemma-4-26b-a4b-it", "opap-gateway");
+    await expect(provider.generate({
+      messages: [{ role: "user", content: "未読メールを探して" }],
+      tools: [{
+        name: "google_gmail_search",
+        description: "Search Gmail",
+        parameters: { type: "object", properties: {} },
+      }],
+      informationPolicy: policy({ allowedDestinationIds: ["provider:workers-ai"] }),
+    })).resolves.toMatchObject({
+      text: "",
+      toolCalls: [{ name: "google_gmail_search", arguments: { query: "is:unread" } }],
+    });
+  });
+
   it("reserves a conservative Workers AI neuron maximum", () => {
     const request = {
       messages: [{ role: "user" as const, content: "hello" }],

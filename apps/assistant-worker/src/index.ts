@@ -18,6 +18,8 @@ import {
   WorkersAiProvider,
   estimateWorkersAiNeurons,
   type ModelRequest,
+  type ModelToolCall,
+  type ModelToolDefinition,
   type WorkersAiBinding,
 } from "@opap/model-router";
 import {
@@ -158,6 +160,46 @@ const problem = (
 type OwnerReservation = {
   quota: DurableObjectStub;
   reservationId: string;
+};
+
+type ApiConnection = {
+  connectionId: string;
+  accountLabel?: string;
+};
+
+const googleConnectionCache = new Map<string, {
+  expiresAt: number;
+  connections: ApiConnection[];
+}>();
+
+const activeGoogleConnectionsForAgent = async (bindings: Bindings): Promise<ApiConnection[]> => {
+  const cached = googleConnectionCache.get(bindings.DEPLOYMENT_ID);
+  if (cached && cached.expiresAt > Date.now()) return cached.connections;
+  const url = new URL("https://google-gatekeeper.internal/internal/v1/connections");
+  url.searchParams.set("deploymentId", bindings.DEPLOYMENT_ID);
+  const response = await bindings.GOOGLE_GATEKEEPER.fetch(url);
+  if (!response.ok) return [];
+  const value: unknown = await response.json();
+  const rows = typeof value === "object" && value !== null &&
+    Array.isArray((value as Record<string, unknown>)["connections"])
+    ? (value as Record<string, unknown>)["connections"] as unknown[]
+    : [];
+  const connections = rows.flatMap((item): ApiConnection[] => {
+    if (typeof item !== "object" || item === null) return [];
+    const row = item as Record<string, unknown>;
+    return row["providerId"] === "google" && row["status"] === "active" &&
+      typeof row["connectionId"] === "string"
+      ? [{
+          connectionId: row["connectionId"],
+          ...(typeof row["accountLabel"] === "string" ? { accountLabel: row["accountLabel"] } : {}),
+        }]
+      : [];
+  });
+  googleConnectionCache.set(bindings.DEPLOYMENT_ID, {
+    expiresAt: Date.now() + 60_000,
+    connections,
+  });
+  return connections;
 };
 
 async function reserveOwnerOperation(input: {
@@ -374,16 +416,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const url = new URL("https://google-gatekeeper.internal/internal/v1/connections");
     url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
     const response = await context.env.GOOGLE_GATEKEEPER.fetch(url);
-    if (!response.ok) return new Response(response.body, response);
-    const value: unknown = await response.json();
-    const result = typeof value === "object" && value !== null && !Array.isArray(value)
-      ? value as Record<string, unknown>
-      : {};
-    return context.json({
-      ...result,
-      gmailDraftAllowedRecipients: (context.env.GMAIL_DRAFT_ALLOWED_RECIPIENTS ?? "")
-        .split(",").map((recipient) => recipient.trim()).filter(Boolean),
-    });
+    return new Response(response.body, response);
   });
 
   app.post("/v1/connections/google/start", async (context) => {
@@ -418,6 +451,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       },
     );
     if (!response.ok) return new Response(response.body, response);
+    googleConnectionCache.delete(context.env.DEPLOYMENT_ID);
     return context.redirect("/?connection=google&status=connected", 302);
   });
 
@@ -433,6 +467,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         }),
       },
     );
+    if (response.ok) googleConnectionCache.delete(context.env.DEPLOYMENT_ID);
     return new Response(response.body, response);
   });
 
@@ -503,6 +538,175 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       },
     );
     return new Response(response.body, response);
+  };
+
+  const googleAgentTools = (
+    connections: readonly ApiConnection[],
+    recipients: readonly string[],
+  ): ModelToolDefinition[] => {
+    const connectionIds = connections.map((connection) => connection.connectionId);
+    const connectionProperty = {
+      type: "string",
+      enum: connectionIds,
+      description: connections.map((connection) =>
+        `${connection.connectionId}: ${connection.accountLabel ?? "Google account"}`).join("; "),
+    };
+    const tools: ModelToolDefinition[] = [
+      {
+        name: "google_gmail_search",
+        description: "Search the owner's Gmail. Use Gmail search syntax in query.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: connectionProperty,
+            query: { type: "string", description: "Gmail search query" },
+          },
+          required: ["connectionId", "query"],
+        },
+      },
+      {
+        name: "google_calendar_list_events",
+        description: "List upcoming events from the owner's primary Google Calendar.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: connectionProperty,
+            timeMin: { type: "string", description: "ISO 8601 lower bound" },
+            timeMax: { type: "string", description: "Optional ISO 8601 upper bound" },
+          },
+          required: ["connectionId"],
+        },
+      },
+      {
+        name: "google_drive_search",
+        description: "Search metadata for files in the owner's Google Drive.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: connectionProperty,
+            query: { type: "string", description: "Google Drive files.list q expression" },
+          },
+          required: ["connectionId"],
+        },
+      },
+      {
+        name: "google_calendar_create_event",
+        description: "Request approval to create an event on the owner's primary calendar. Does not invite attendees.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: connectionProperty,
+            summary: { type: "string" },
+            start: { type: "string", description: "ISO 8601 start time" },
+            end: { type: "string", description: "ISO 8601 end time" },
+            timeZone: { type: "string", description: "IANA time zone" },
+          },
+          required: ["connectionId", "summary", "start", "end"],
+        },
+      },
+    ];
+    if (recipients.length > 0) tools.push({
+      name: "google_gmail_create_draft",
+      description: "Request approval to create (not send) a Gmail draft to an allowed recipient.",
+      parameters: {
+        type: "object",
+        properties: {
+          connectionId: connectionProperty,
+          to: { type: "string", enum: recipients },
+          subject: { type: "string" },
+          body: { type: "string" },
+        },
+        required: ["connectionId", "to", "subject", "body"],
+      },
+    });
+    return tools;
+  };
+
+  const executeGoogleAgentTool = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
+    call: ModelToolCall,
+    connectionIds: ReadonlySet<string>,
+  ): Promise<string> => {
+    const connectionId = call.arguments["connectionId"];
+    if (typeof connectionId !== "string" || !connectionIds.has(connectionId)) {
+      return "Google Toolを実行できませんでした: 接続が無効です。";
+    }
+    const requestId = context.req.header("cf-ray") ?? crypto.randomUUID();
+    const googleFetch = async (path: string, input: Record<string, JsonValue>) => {
+      const response = await context.env.GOOGLE_GATEKEEPER.fetch(
+        `https://google-gatekeeper.internal${path}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...input, deploymentId: context.env.DEPLOYMENT_ID, connectionId,
+            principalId: context.get("ownerPrincipalId"), requestId,
+          }),
+        },
+      );
+      const value: unknown = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(`GOOGLE_TOOL_FAILED_${response.status}`);
+      return value;
+    };
+    if (call.name === "google_gmail_search") {
+      const query = call.arguments["query"];
+      if (typeof query !== "string") return "Gmail検索条件が不正です。";
+      const value = await googleFetch("/internal/v1/google/gmail/search", {
+        query, maxResults: 10,
+      });
+      return `Gmail検索結果（モデルへ再送していません）:\n${JSON.stringify(value, null, 2)}`;
+    }
+    if (call.name === "google_calendar_list_events") {
+      const input: Record<string, JsonValue> = { maxResults: 10 };
+      if (typeof call.arguments["timeMin"] === "string") input["timeMin"] = call.arguments["timeMin"];
+      if (typeof call.arguments["timeMax"] === "string") input["timeMax"] = call.arguments["timeMax"];
+      const value = await googleFetch("/internal/v1/google/calendar/events/list", input);
+      return `Calendar取得結果（モデルへ再送していません）:\n${JSON.stringify(value, null, 2)}`;
+    }
+    if (call.name === "google_drive_search") {
+      const query = call.arguments["query"];
+      const value = await googleFetch("/internal/v1/google/drive/files/search", {
+        ...(typeof query === "string" ? { query } : {}), pageSize: 10,
+      });
+      return `Drive検索結果（モデルへ再送していません）:\n${JSON.stringify(value, null, 2)}`;
+    }
+    if (call.name === "google_gmail_create_draft") {
+      const to = call.arguments["to"];
+      const subject = call.arguments["subject"];
+      const body = call.arguments["body"];
+      if (typeof to !== "string" || typeof subject !== "string" || typeof body !== "string") {
+        return "Gmail下書きの内容が不正です。";
+      }
+      const approval = await requestGoogleWriteApproval(context, "google.gmail.drafts.create", {
+        connectionId, to, subject, body,
+      }, {
+        destination: to, operation: "Create Gmail draft", subject, bodyPreview: body.slice(0, 500),
+      });
+      const value: unknown = await approval.json().catch(() => ({}));
+      if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
+      const approvalId = typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)["approvalId"] : undefined;
+      return `Gmail下書きの作成は承認待ちです。承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
+    }
+    if (call.name === "google_calendar_create_event") {
+      const summary = call.arguments["summary"];
+      const start = call.arguments["start"];
+      const end = call.arguments["end"];
+      if (typeof summary !== "string" || typeof start !== "string" || typeof end !== "string") {
+        return "Calendar予定の内容が不正です。";
+      }
+      const operation: Record<string, JsonValue> = { connectionId, summary, start, end };
+      if (typeof call.arguments["timeZone"] === "string") operation["timeZone"] = call.arguments["timeZone"];
+      const approval = await requestGoogleWriteApproval(context, "google.calendar.events.create", operation, {
+        destination: "Google Calendar", operation: "Create calendar event", summary, start, end,
+      });
+      const value: unknown = await approval.json().catch(() => ({}));
+      if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
+      const approvalId = typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)["approvalId"] : undefined;
+      return `Calendar予定の作成は承認待ちです。承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
+    }
+    return "要求されたToolは利用できません。";
   };
 
   app.post("/v1/google/:connectionId/gmail/drafts", async (context) => {
@@ -769,8 +973,22 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (!destinationAllowed) {
       return problem(context.req.raw, 403, "MODEL_DESTINATION_DENIED");
     }
+    const googleConnections = await activeGoogleConnectionsForAgent(context.env).catch(() => []);
+    const recipients = (context.env.GMAIL_DRAFT_ALLOWED_RECIPIENTS ?? "")
+      .split(",").map((recipient) => recipient.trim()).filter(Boolean);
+    const tools = googleConnections.length > 0
+      ? googleAgentTools(googleConnections, recipients)
+      : [];
     const modelRequest: ModelRequest = {
-      messages: [{ role: "user", content }],
+      messages: [
+        ...(tools.length > 0
+          ? [{
+              role: "system" as const,
+              content: "You are the owner's personal agent. Use an available Google tool when the request requires Gmail, Calendar, or Drive. Never claim a write completed when it only requested approval.",
+            }]
+          : []),
+        { role: "user", content },
+      ],
       informationPolicy: {
         deploymentId: context.env.DEPLOYMENT_ID,
         subjectPrincipalIds: [principalId],
@@ -782,6 +1000,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         retention: { mode: "until-deleted" },
       },
       audience: "owner",
+      ...(tools.length > 0 ? { tools } : {}),
     };
     const now = dependencies.now?.() ?? new Date();
     const reservation = await reserveOwnerOperation({
@@ -851,6 +1070,28 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         error instanceof ModelRoutingError ? error.code : "MODEL_PROVIDER_FAILED",
       );
     }
+    let assistantContent = generated.text;
+    const billedModelOutput = generated.text || JSON.stringify(generated.toolCalls ?? []);
+    if (generated.toolCalls?.length) {
+      const connectionIds = new Set(googleConnections.map((connection) => connection.connectionId));
+      const outputs: string[] = [];
+      let writeRequested = false;
+      for (const call of generated.toolCalls.slice(0, 3)) {
+        const isWrite = call.name === "google_gmail_create_draft" ||
+          call.name === "google_calendar_create_event";
+        if (isWrite && writeRequested) {
+          outputs.push("同じメッセージ内の追加書込は安全のため処理しませんでした。");
+          continue;
+        }
+        if (isWrite) writeRequested = true;
+        try {
+          outputs.push(await executeGoogleAgentTool(context, call, connectionIds));
+        } catch {
+          outputs.push(`Tool ${call.name} の実行に失敗しました。`);
+        }
+      }
+      assistantContent = outputs.join("\n\n");
+    }
     let response: Response;
     try {
       response = await stub.fetch("https://conversation.internal/exchange", {
@@ -860,7 +1101,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           principalId,
           idempotencyKey,
           userContent: content,
-          assistantContent: generated.text,
+          assistantContent,
           providerId: generated.providerId,
         }),
       });
@@ -870,7 +1111,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         await settleAi(
           aiReservation,
           context.env.DEPLOYMENT_ID,
-          estimateWorkersAiNeurons(modelRequest, generated.text),
+          estimateWorkersAiNeurons(modelRequest, billedModelOutput),
         ).catch(() => false);
       }
       return problem(context.req.raw, 503, "CONVERSATION_UNAVAILABLE");
@@ -881,7 +1122,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         await settleAi(
           aiReservation,
           context.env.DEPLOYMENT_ID,
-          estimateWorkersAiNeurons(modelRequest, generated.text),
+          estimateWorkersAiNeurons(modelRequest, billedModelOutput),
         ).catch(() => false);
       }
       return new Response(response.body, response);
@@ -889,7 +1130,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (aiReservation && !await settleAi(
       aiReservation,
       context.env.DEPLOYMENT_ID,
-      estimateWorkersAiNeurons(modelRequest, generated.text),
+      estimateWorkersAiNeurons(modelRequest, billedModelOutput),
     )) {
       return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
     }
