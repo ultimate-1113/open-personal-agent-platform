@@ -1,9 +1,9 @@
 # Security Policy
 
-脆弱性を公開Issueへ投稿しないでください。
+[日本語](SECURITY.ja.md)
 
-RepositoryのSecurity Advisory機能から、再現条件、影響範囲、推奨する緩和策を報告してください。
+Do not report a vulnerability in a public issue.
+Use the repository's private Security Advisory feature and include reproduction conditions, impact, and a suggested mitigation when available.
 
-資格情報、個人データ、実在する外部Resource IDを報告へ含めないでください。
-
-現在の公開版はベータであり、長期サポート版はまだありません。
+Do not include credentials, personal data, or real external resource IDs in a report.
+The current public release is an alpha and does not yet have a long-term support line.

@@ -1,7 +1,8 @@
 # Deployment profiles
 
-このディレクトリには、後続Phaseで`local-dev`、`staging`、`production`の配置Profileを追加します。
+[日本語](README.ja.md)
 
-Phase 2では、Resource IDを含む生成済みWrangler設定を`.wrangler`配下へ置き、Gitへ追加しません。
+Later phases will add `local-dev`, `staging`, and `production` deployment profiles here.
+During Phase 2, generated Wrangler configuration containing resource IDs belongs under `.wrangler` and must not be committed.
 
-stagingの検証順序は[Phase 2 staging検証](../docs/operations/phase-2-staging.md)に定義しています。
+See [Phase 2 staging validation](../docs/en/operations/phase-2-staging.md).

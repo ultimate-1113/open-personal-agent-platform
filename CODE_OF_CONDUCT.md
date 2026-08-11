@@ -1,5 +1,8 @@
 # Code of Conduct
 
-本プロジェクトではContributor Covenant 2.1の趣旨に従い、参加者への敬意、建設的な議論、差別と嫌がらせの禁止を求めます。
+[日本語](CODE_OF_CONDUCT.ja.md)
 
-問題がある場合は、公開IssueではなくRepository管理者へ非公開で連絡してください。
+This project follows the intent of Contributor Covenant 2.1.
+Participants must treat one another with respect, keep discussion constructive, and avoid discrimination and harassment.
+
+Report conduct concerns privately to the repository maintainers rather than in a public issue.

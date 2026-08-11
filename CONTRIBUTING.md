@@ -1,12 +1,16 @@
 # Contributing
 
-## 開発手順
+[日本語](CONTRIBUTING.ja.md)
 
-1. Node.js 24とpnpm 10を用意します。
-2. `pnpm install`を実行します。
-3. 変更後に`pnpm check`を実行します。
-4. 公開Packageの挙動を変更する場合はChangesetを追加します。
+## Development
 
-Fixtureには架空の人物、組織、メール、予定、Repositoryだけを使用してください。
+1. Install Node.js 24 and pnpm 10.
+2. Run `pnpm install`.
+3. Run `pnpm check` after making changes.
+4. Add a Changeset when public package behavior changes.
+5. Update both English and Japanese documentation when meaning changes.
 
-外部Pull Requestで実資格情報を使うテストは実行しません。
+Use only fictional people, organizations, email, calendar events, and repositories in fixtures.
+External pull requests never run tests with real credentials.
+
+See the [localization guide](docs/en/contributing/localization.md) for UI catalogs, themes, and bilingual document layout.
