@@ -37,6 +37,7 @@ type Bindings = {
   ACCESS_JWKS_URI: string;
   CONTROL: Fetcher;
   GOOGLE_GATEKEEPER: Fetcher;
+  GITHUB_GATEKEEPER: Fetcher;
   CONVERSATIONS: DurableObjectNamespace;
   OWNER_QUOTA: DurableObjectNamespace;
   AI?: WorkersAiBinding;
@@ -171,35 +172,46 @@ const googleConnectionCache = new Map<string, {
   connections: ApiConnection[];
 }>();
 
-const activeGoogleConnectionsForAgent = async (bindings: Bindings): Promise<ApiConnection[]> => {
-  const cached = googleConnectionCache.get(bindings.DEPLOYMENT_ID);
+const githubConnectionCache = new Map<string, {
+  expiresAt: number;
+  connections: ApiConnection[];
+}>();
+
+const activeConnections = async (
+  bindings: Bindings,
+  providerId: "google" | "github",
+  gatekeeper: Fetcher,
+  cache: Map<string, { expiresAt: number; connections: ApiConnection[] }>,
+): Promise<ApiConnection[]> => {
+  const cached = cache.get(bindings.DEPLOYMENT_ID);
   if (cached && cached.expiresAt > Date.now()) return cached.connections;
-  const url = new URL("https://google-gatekeeper.internal/internal/v1/connections");
+  const url = new URL(`https://${providerId}-gatekeeper.internal/internal/v1/connections`);
   url.searchParams.set("deploymentId", bindings.DEPLOYMENT_ID);
-  const response = await bindings.GOOGLE_GATEKEEPER.fetch(url);
+  const response = await gatekeeper.fetch(url);
   if (!response.ok) return [];
   const value: unknown = await response.json();
   const rows = typeof value === "object" && value !== null &&
     Array.isArray((value as Record<string, unknown>)["connections"])
-    ? (value as Record<string, unknown>)["connections"] as unknown[]
-    : [];
+    ? (value as Record<string, unknown>)["connections"] as unknown[] : [];
   const connections = rows.flatMap((item): ApiConnection[] => {
     if (typeof item !== "object" || item === null) return [];
     const row = item as Record<string, unknown>;
-    return row["providerId"] === "google" && row["status"] === "active" &&
+    return row["providerId"] === providerId && row["status"] === "active" &&
       typeof row["connectionId"] === "string"
-      ? [{
-          connectionId: row["connectionId"],
-          ...(typeof row["accountLabel"] === "string" ? { accountLabel: row["accountLabel"] } : {}),
-        }]
+      ? [{ connectionId: row["connectionId"],
+          ...(typeof row["accountLabel"] === "string" ? { accountLabel: row["accountLabel"] } : {}) }]
       : [];
   });
-  googleConnectionCache.set(bindings.DEPLOYMENT_ID, {
-    expiresAt: Date.now() + 60_000,
-    connections,
-  });
+  cache.set(bindings.DEPLOYMENT_ID, { expiresAt: Date.now() + 60_000, connections });
   return connections;
 };
+
+const activeGoogleConnectionsForAgent = async (bindings: Bindings): Promise<ApiConnection[]> => {
+  return activeConnections(bindings, "google", bindings.GOOGLE_GATEKEEPER, googleConnectionCache);
+};
+
+const activeGitHubConnectionsForAgent = async (bindings: Bindings): Promise<ApiConnection[]> =>
+  activeConnections(bindings, "github", bindings.GITHUB_GATEKEEPER, githubConnectionCache);
 
 async function reserveOwnerOperation(input: {
   bindings: Bindings;
@@ -410,12 +422,29 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   app.use("/v1/connections/*", authorizeConversation);
   app.use("/v1/google", authorizeConversation);
   app.use("/v1/google/*", authorizeConversation);
+  app.use("/v1/github", authorizeConversation);
+  app.use("/v1/github/*", authorizeConversation);
 
   app.get("/v1/connections", async (context) => {
-    const url = new URL("https://google-gatekeeper.internal/internal/v1/connections");
-    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
-    const response = await context.env.GOOGLE_GATEKEEPER.fetch(url);
-    return new Response(response.body, response);
+    const fetchConnections = async (provider: "google" | "github", gatekeeper: Fetcher) => {
+      const url = new URL(`https://${provider}-gatekeeper.internal/internal/v1/connections`);
+      url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+      const response = await gatekeeper.fetch(url);
+      if (!response.ok) throw new Error(`${provider.toUpperCase()}_CONNECTIONS_UNAVAILABLE`);
+      const value: unknown = await response.json();
+      return typeof value === "object" && value !== null &&
+        Array.isArray((value as Record<string, unknown>)["connections"])
+        ? (value as Record<string, unknown>)["connections"] as unknown[] : [];
+    };
+    try {
+      const [google, github] = await Promise.all([
+        fetchConnections("google", context.env.GOOGLE_GATEKEEPER),
+        fetchConnections("github", context.env.GITHUB_GATEKEEPER),
+      ]);
+      return context.json({ connections: [...google, ...github] });
+    } catch {
+      return problem(context.req.raw, 503, "CONNECTIONS_UNAVAILABLE");
+    }
   });
 
   app.post("/v1/connections/google/start", async (context) => {
@@ -454,19 +483,51 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     return context.redirect("/?connection=google&status=connected", 302);
   });
 
+  app.post("/v1/connections/github/start", async (context) => {
+    const requestUrl = new URL(context.req.url);
+    const redirectUri = new URL("/v1/connections/github/callback", requestUrl.origin).toString();
+    const response = await context.env.GITHUB_GATEKEEPER.fetch(
+      "https://github-gatekeeper.internal/internal/v1/oauth/start",
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID, redirectUri }) },
+    );
+    return new Response(response.body, response);
+  });
+
+  app.get("/v1/connections/github/callback", async (context) => {
+    const state = context.req.query("state");
+    const code = context.req.query("code");
+    if (!state || !code) return problem(context.req.raw, 400, "OAUTH_CALLBACK_INVALID");
+    const response = await context.env.GITHUB_GATEKEEPER.fetch(
+      "https://github-gatekeeper.internal/internal/v1/oauth/callback",
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"), state, code,
+        }) },
+    );
+    if (!response.ok) return new Response(response.body, response);
+    githubConnectionCache.delete(context.env.DEPLOYMENT_ID);
+    return context.redirect("/?connection=github&status=connected", 302);
+  });
+
   app.delete("/v1/connections/:connectionId", async (context) => {
-    const response = await context.env.GOOGLE_GATEKEEPER.fetch(
-      "https://google-gatekeeper.internal/internal/v1/connections",
+    const connectionId = context.req.param("connectionId");
+    const github = connectionId.startsWith("connection:github:");
+    const gatekeeper = github ? context.env.GITHUB_GATEKEEPER : context.env.GOOGLE_GATEKEEPER;
+    const response = await gatekeeper.fetch(
+      `https://${github ? "github" : "google"}-gatekeeper.internal/internal/v1/connections`,
       {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           deploymentId: context.env.DEPLOYMENT_ID,
-          connectionId: context.req.param("connectionId"),
+          connectionId,
         }),
       },
     );
-    if (response.ok) googleConnectionCache.delete(context.env.DEPLOYMENT_ID);
+    if (response.ok) (github ? githubConnectionCache : googleConnectionCache)
+      .delete(context.env.DEPLOYMENT_ID);
     return new Response(response.body, response);
   });
 
@@ -509,12 +570,46 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   app.post("/v1/google/:connectionId/drive/search", (context) =>
     forwardGoogleRead(context, "/internal/v1/google/drive/files/search"));
 
-  const requestGoogleWriteApproval = async (
+  const forwardGitHubRead = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
+    internalPath: string,
+  ): Promise<Response> => {
+    const value: unknown = await context.req.json().catch(() => ({}));
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const response = await context.env.GITHUB_GATEKEEPER.fetch(
+      `https://github-gatekeeper.internal${internalPath}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...(value as Record<string, unknown>),
+          deploymentId: context.env.DEPLOYMENT_ID,
+          connectionId: context.req.param("connectionId") }) },
+    );
+    return new Response(response.body, { status: response.status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" } });
+  };
+
+  app.post("/v1/github/:connectionId/repositories", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/repositories/list"));
+  app.post("/v1/github/:connectionId/issues/search", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/issues/search"));
+  app.post("/v1/github/:connectionId/code/search", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/code/search"));
+  app.post("/v1/github/:connectionId/pulls", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/pulls/list"));
+  app.post("/v1/github/:connectionId/notifications", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/notifications/list"));
+  app.post("/v1/github/:connectionId/issue-comments", (context) =>
+    forwardGitHubRead(context, "/internal/v1/github/issue-comments/list"));
+
+  const requestExternalWriteApproval = async (
     context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
     capabilityId: "google.gmail.drafts.create" | "google.gmail.messages.send" |
-      "google.calendar.events.create",
+      "google.calendar.events.create" | "github.issues.create" |
+      "github.issue-comments.create",
     operationRequest: Record<string, JsonValue>,
     preview: Record<string, JsonValue>,
+    gatekeeperId = "gatekeeper:google-personal",
   ): Promise<Response> => {
     const idempotencyKey = context.req.header("idempotency-key");
     if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
@@ -527,7 +622,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           deploymentId: context.env.DEPLOYMENT_ID,
           principalId: context.get("ownerPrincipalId"),
           capabilityId,
-          gatekeeperId: "gatekeeper:google-personal",
+          gatekeeperId,
           taskId: `task:${crypto.randomUUID()}`,
           request: operationRequest,
           requestDigest: await createRequestDigest(operationRequest),
@@ -684,7 +779,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       if (typeof to !== "string" || typeof subject !== "string" || typeof body !== "string") {
         return "Gmail送信内容が不正です。";
       }
-      const approval = await requestGoogleWriteApproval(context, "google.gmail.messages.send", {
+      const approval = await requestExternalWriteApproval(context, "google.gmail.messages.send", {
         connectionId, to, subject, body,
       }, {
         destination: to, operation: "Send Gmail message", subject, body,
@@ -704,7 +799,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       }
       const operation: Record<string, JsonValue> = { connectionId, summary, start, end };
       if (typeof call.arguments["timeZone"] === "string") operation["timeZone"] = call.arguments["timeZone"];
-      const approval = await requestGoogleWriteApproval(context, "google.calendar.events.create", operation, {
+      const approval = await requestExternalWriteApproval(context, "google.calendar.events.create", operation, {
         destination: "Google Calendar", operation: "Create calendar event", summary, start, end,
       });
       const value: unknown = await approval.json().catch(() => ({}));
@@ -714,6 +809,94 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       return `Calendar予定の作成は承認待ちです。承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
     }
     return "要求されたToolは利用できません。";
+  };
+
+  const githubAgentTools = (connections: readonly ApiConnection[]): ModelToolDefinition[] => {
+    const connectionProperty = { type: "string",
+      enum: connections.map((connection) => connection.connectionId),
+      description: connections.map((connection) =>
+        `${connection.connectionId}: ${connection.accountLabel ?? "GitHub account"}`).join("; ") };
+    const base = { connectionId: connectionProperty };
+    return [
+      { name: "github_notifications_list", description: "List unread GitHub notifications involving the owner.",
+        parameters: { type: "object", properties: { ...base, participating: { type: "boolean" } }, required: ["connectionId"] } },
+      { name: "github_issues_search", description: "Search GitHub issues and pull requests.",
+        parameters: { type: "object", properties: { ...base, query: { type: "string" } }, required: ["connectionId", "query"] } },
+      { name: "github_code_search", description: "Search code accessible to the GitHub App installation.",
+        parameters: { type: "object", properties: { ...base, query: { type: "string" } }, required: ["connectionId", "query"] } },
+      { name: "github_pulls_list", description: "List pull requests in a repository.",
+        parameters: { type: "object", properties: { ...base, repository: { type: "string" } }, required: ["connectionId", "repository"] } },
+      { name: "github_issue_comments_list", description: "Read comments from an issue or pull request.",
+        parameters: { type: "object", properties: { ...base, repository: { type: "string" }, issueNumber: { type: "number" } }, required: ["connectionId", "repository", "issueNumber"] } },
+      { name: "github_issue_create", description: "Request approval to create a GitHub issue.",
+        parameters: { type: "object", properties: { ...base, repository: { type: "string" }, title: { type: "string" }, body: { type: "string" } }, required: ["connectionId", "repository", "title", "body"] } },
+      { name: "github_issue_comment_create", description: "Request approval to reply to a GitHub issue or pull request.",
+        parameters: { type: "object", properties: { ...base, repository: { type: "string" }, issueNumber: { type: "number" }, body: { type: "string" } }, required: ["connectionId", "repository", "issueNumber", "body"] } },
+    ];
+  };
+
+  const executeGitHubAgentTool = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0], call: ModelToolCall,
+    connections: readonly ApiConnection[],
+  ): Promise<string> => {
+    const requested = typeof call.arguments["connectionId"] === "string"
+      ? call.arguments["connectionId"].trim().toLocaleLowerCase() : "";
+    const matched = connections.find((connection) =>
+      connection.connectionId.toLocaleLowerCase() === requested ||
+      connection.accountLabel?.trim().toLocaleLowerCase() === requested) ??
+      (connections.length === 1 ? connections[0] : undefined);
+    if (!matched) return "GitHubアカウントを特定できませんでした。";
+    const connectionId = matched.connectionId;
+    const githubFetch = async (path: string, input: Record<string, JsonValue>) => {
+      const response = await context.env.GITHUB_GATEKEEPER.fetch(`https://github-gatekeeper.internal${path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, deploymentId: context.env.DEPLOYMENT_ID, connectionId }),
+      });
+      const value: unknown = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(`GITHUB_TOOL_FAILED_${response.status}`);
+      return value;
+    };
+    const repository = call.arguments["repository"];
+    const issueNumber = call.arguments["issueNumber"];
+    const body = call.arguments["body"];
+    if (call.name === "github_notifications_list") {
+      return `GitHub通知（モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
+        "/internal/v1/github/notifications/list", { participating: call.arguments["participating"] === true }), null, 2)}`;
+    }
+    if (call.name === "github_issues_search" || call.name === "github_code_search") {
+      const query = call.arguments["query"];
+      if (typeof query !== "string") return "GitHub検索条件が不正です。";
+      return `GitHub検索結果（モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
+        `/internal/v1/github/${call.name === "github_issues_search" ? "issues" : "code"}/search`, { query }), null, 2)}`;
+    }
+    if (call.name === "github_pulls_list" || call.name === "github_issue_comments_list") {
+      if (typeof repository !== "string" || (call.name === "github_issue_comments_list" && typeof issueNumber !== "number")) return "GitHub対象が不正です。";
+      const path = call.name === "github_pulls_list" ? "/internal/v1/github/pulls/list" : "/internal/v1/github/issue-comments/list";
+      return `GitHub取得結果（モデルへ再送していません）:\n${JSON.stringify(await githubFetch(path,
+        { repository, ...(typeof issueNumber === "number" ? { issueNumber } : {}) }), null, 2)}`;
+    }
+    if (call.name === "github_issue_create") {
+      const title = call.arguments["title"];
+      if (typeof repository !== "string" || typeof title !== "string" || typeof body !== "string") return "Issue作成内容が不正です。";
+      const approval = await requestExternalWriteApproval(context, "github.issues.create",
+        { connectionId, repository, title, body },
+        { destination: repository, operation: "Create GitHub issue", title, body }, "gatekeeper:github-personal");
+      const value: unknown = await approval.json().catch(() => ({}));
+      if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
+      const id = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["approvalId"] : undefined;
+      return `GitHub Issue作成は承認待ちです。${typeof id === "string" ? ` (${id})` : ""}`;
+    }
+    if (call.name === "github_issue_comment_create") {
+      if (typeof repository !== "string" || typeof issueNumber !== "number" || typeof body !== "string") return "コメント内容が不正です。";
+      const approval = await requestExternalWriteApproval(context, "github.issue-comments.create",
+        { connectionId, repository, issueNumber, body },
+        { destination: `${repository}#${issueNumber}`, operation: "Post GitHub comment", body }, "gatekeeper:github-personal");
+      const value: unknown = await approval.json().catch(() => ({}));
+      if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
+      const id = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["approvalId"] : undefined;
+      return `GitHubコメント投稿は承認待ちです。${typeof id === "string" ? ` (${id})` : ""}`;
+    }
+    return "要求されたGitHub Toolは利用できません。";
   };
 
   app.post("/v1/google/:connectionId/gmail/messages/send", async (context) => {
@@ -733,7 +916,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       connectionId: context.req.param("connectionId"),
       to: body["to"], subject: body["subject"], body: body["body"],
     };
-    return requestGoogleWriteApproval(context, "google.gmail.messages.send", operationRequest, {
+    return requestExternalWriteApproval(context, "google.gmail.messages.send", operationRequest, {
       destination: body["to"], operation: "Send Gmail message",
       subject: body["subject"], body: body["body"],
     });
@@ -759,7 +942,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       ...(typeof body["description"] === "string" ? { description: body["description"] } : {}),
       ...(typeof body["timeZone"] === "string" ? { timeZone: body["timeZone"] } : {}),
     };
-    return requestGoogleWriteApproval(context, "google.calendar.events.create", operationRequest, {
+    return requestExternalWriteApproval(context, "google.calendar.events.create", operationRequest, {
       destination: "Google Calendar", operation: "Create calendar event",
       summary: body["summary"], start: body["start"], end: body["end"],
     });
@@ -980,16 +1163,20 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (!destinationAllowed) {
       return problem(context.req.raw, 403, "MODEL_DESTINATION_DENIED");
     }
-    const googleConnections = await activeGoogleConnectionsForAgent(context.env).catch(() => []);
-    const tools = googleConnections.length > 0
-      ? googleAgentTools(googleConnections)
-      : [];
+    const [googleConnections, githubConnections] = await Promise.all([
+      activeGoogleConnectionsForAgent(context.env).catch(() => []),
+      activeGitHubConnectionsForAgent(context.env).catch(() => []),
+    ]);
+    const tools = [
+      ...(googleConnections.length > 0 ? googleAgentTools(googleConnections) : []),
+      ...(githubConnections.length > 0 ? githubAgentTools(githubConnections) : []),
+    ];
     const modelRequest: ModelRequest = {
       messages: [
         ...(tools.length > 0
           ? [{
               role: "system" as const,
-              content: "You are the owner's personal agent. Use an available Google tool when the request requires Gmail, Calendar, or Drive. Never claim a write completed when it only requested approval.",
+              content: "You are the owner's personal agent. Use available Google and GitHub tools when needed. GitHub notifications and issue or pull-request comments are inbound messages to handle. Never claim a write completed when it only requested approval.",
             }]
           : []),
         { role: "user", content },
@@ -1082,14 +1269,17 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       let writeRequested = false;
       for (const call of generated.toolCalls.slice(0, 3)) {
         const isWrite = call.name === "google_gmail_send" ||
-          call.name === "google_calendar_create_event";
+          call.name === "google_calendar_create_event" ||
+          call.name === "github_issue_create" || call.name === "github_issue_comment_create";
         if (isWrite && writeRequested) {
           outputs.push("同じメッセージ内の追加書込は安全のため処理しませんでした。");
           continue;
         }
         if (isWrite) writeRequested = true;
         try {
-          outputs.push(await executeGoogleAgentTool(context, call, googleConnections));
+          outputs.push(call.name.startsWith("github_")
+            ? await executeGitHubAgentTool(context, call, githubConnections)
+            : await executeGoogleAgentTool(context, call, googleConnections));
         } catch {
           outputs.push(`Tool ${call.name} の実行に失敗しました。`);
         }
@@ -1345,8 +1535,11 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       typeof approved["executionRequest"] !== "object" || approved["executionRequest"] === null) {
       return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
     }
-    const execution = await context.env.GOOGLE_GATEKEEPER.fetch(
-      "https://google-gatekeeper.internal/internal/v1/google/execute",
+    const githubExecution = approved["capabilityId"].startsWith("github.");
+    const executionGatekeeper = githubExecution
+      ? context.env.GITHUB_GATEKEEPER : context.env.GOOGLE_GATEKEEPER;
+    const execution = await executionGatekeeper.fetch(
+      `https://${githubExecution ? "github" : "google"}-gatekeeper.internal/internal/v1/${githubExecution ? "github" : "google"}/execute`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -83,7 +83,7 @@ export const OAUTH_PROVIDERS: Readonly<Record<OAuthProvider["id"], OAuthProvider
     id: "github",
     authorizationEndpoint: "https://github.com/login/oauth/authorize",
     tokenEndpoint: "https://github.com/login/oauth/access_token",
-    clientAuthentication: "client-secret-basic",
+    clientAuthentication: "client-secret-post",
     scopeSeparator: " ",
   },
   discord: {
@@ -128,7 +128,9 @@ export async function createAuthorizationStart(input: {
     throw new Error("OAuth redirect URI must use HTTPS");
   }
   const scopes = [...new Set(input.scopes)].sort();
-  if (scopes.length === 0) throw new Error("At least one OAuth scope is required");
+  if (scopes.length === 0 && input.provider.id !== "github") {
+    throw new Error("At least one OAuth scope is required");
+  }
   const state = randomBase64Url(32);
   const codeVerifier = randomBase64Url(64);
   const transactionId = `oauth:${randomBase64Url(24)}`;
@@ -136,7 +138,9 @@ export async function createAuthorizationStart(input: {
   authorization.searchParams.set("response_type", "code");
   authorization.searchParams.set("client_id", input.clientId);
   authorization.searchParams.set("redirect_uri", redirect.toString());
-  authorization.searchParams.set("scope", scopes.join(input.provider.scopeSeparator));
+  if (scopes.length > 0) {
+    authorization.searchParams.set("scope", scopes.join(input.provider.scopeSeparator));
+  }
   authorization.searchParams.set("state", state);
   authorization.searchParams.set("code_challenge", await sha256Base64Url(codeVerifier));
   authorization.searchParams.set("code_challenge_method", "S256");

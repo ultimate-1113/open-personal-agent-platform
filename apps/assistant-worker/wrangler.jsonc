@@ -26,6 +26,10 @@
     {
       "binding": "GOOGLE_GATEKEEPER",
       "service": "opap-google-gatekeeper"
+    },
+    {
+      "binding": "GITHUB_GATEKEEPER",
+      "service": "opap-github-gatekeeper"
     }
   ],
   "durable_objects": {

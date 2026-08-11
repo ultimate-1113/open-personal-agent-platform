@@ -273,7 +273,8 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     typeof input["preview"] !== "object" || input["preview"] === null ||
     typeof input["request"] !== "object" || input["request"] === null ||
     typeof input["taskId"] !== "string" ||
-    input["gatekeeperId"] !== "gatekeeper:google-personal" ||
+    (input["gatekeeperId"] !== "gatekeeper:google-personal" &&
+      input["gatekeeperId"] !== "gatekeeper:github-personal") ||
     typeof input["requestId"] !== "string"
     || typeof input["idempotencyKey"] !== "string"
   ) {
@@ -281,8 +282,14 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
   }
   if (input["capabilityId"] !== "google.gmail.drafts.create" &&
     input["capabilityId"] !== "google.gmail.messages.send" &&
-    input["capabilityId"] !== "google.calendar.events.create") {
+    input["capabilityId"] !== "google.calendar.events.create" &&
+    input["capabilityId"] !== "github.issues.create" &&
+    input["capabilityId"] !== "github.issue-comments.create") {
     return Response.json({ code: "CAPABILITY_NOT_ALLOWED" }, { status: 403 });
+  }
+  if ((String(input["capabilityId"]).startsWith("github.")) !==
+    (input["gatekeeperId"] === "gatekeeper:github-personal")) {
+    return Response.json({ code: "GATEKEEPER_CAPABILITY_MISMATCH" }, { status: 403 });
   }
   const operationRequest = input["request"] as JsonValue;
   if (await createRequestDigest(operationRequest) !== input["requestDigest"]) {

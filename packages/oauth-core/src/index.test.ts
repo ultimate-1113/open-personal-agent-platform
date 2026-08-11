@@ -16,6 +16,18 @@ import {
 const now = new Date("2026-08-11T00:00:00.000Z");
 
 describe("OAuth authorization flow", () => {
+  it("omits scopes for a GitHub App user authorization flow", async () => {
+    const started = await createAuthorizationStart({
+      provider: OAUTH_PROVIDERS.github,
+      clientId: "github-client",
+      redirectUri: "https://agent.example.test/v1/connections/github/callback",
+      scopes: [],
+      connectionKind: "personal",
+      now,
+    });
+    expect(new URL(started.authorizationUrl).searchParams.has("scope")).toBe(false);
+  });
+
   it("creates a short-lived state and S256 PKCE challenge", async () => {
     const started = await createAuthorizationStart({
       provider: OAUTH_PROVIDERS.google,

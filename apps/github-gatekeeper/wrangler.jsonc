@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-github-gatekeeper",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "vars": {
+    "ENVIRONMENT": "development",
+    "GITHUB_CLIENT_ID": "configure-me",
+    "CREDENTIAL_KEY_ID": "kek:development"
+  },
+  "d1_databases": [{
+    "binding": "GATEKEEPER_DB",
+    "database_name": "opap-github-gatekeeper-development",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "../../migrations/gatekeeper"
+  }]
+}

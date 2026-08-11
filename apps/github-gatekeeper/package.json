@@ -1,0 +1,20 @@
+{
+  "name": "@opap/github-gatekeeper",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@opap/approval": "workspace:*",
+    "@opap/github-connector": "workspace:*",
+    "@opap/oauth-core": "workspace:*",
+    "jose": "^6.1.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251202.0",
+    "wrangler": "^4.88.0"
+  }
+}

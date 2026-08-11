@@ -248,6 +248,20 @@ export function App() {
     }
   };
 
+  const connectGitHub = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request("/v1/connections/github/start", { method: "POST" });
+      const authorizationUrl = display(result["authorizationUrl"]);
+      if (!authorizationUrl) throw new Error(t("errors.connection"));
+      window.location.assign(authorizationUrl);
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+      setBusy(false);
+    }
+  };
+
   const disconnect = async (connectionId: string) => {
     setBusy(true);
     setError("");
@@ -349,6 +363,10 @@ export function App() {
     ? collection.filter((connection) =>
         connection["providerId"] === "google" && connection["status"] === "active")
     : [];
+  const activeGitHubConnections = tab === "connections"
+    ? collection.filter((connection) =>
+        connection["providerId"] === "github" && connection["status"] === "active")
+    : [];
   const activeTab = tabs.find((item) => item.id === tab);
 
   return <div className="shell">
@@ -427,14 +445,20 @@ export function App() {
           </button>
         </form>}
       {tab === "connections" &&
-        <section className="connection-actions">
-          <div><strong>Google</strong><p>{t("connections.googleHelp")}</p></div>
-          <button disabled={busy} onClick={() => void connectGoogle()}>
-            {t(activeGoogleConnections.length > 0
-              ? "connections.addGoogleAccount"
-              : "connections.connectGoogle")}
-          </button>
-        </section>}
+        <>
+          <section className="connection-actions">
+            <div><strong>Google</strong><p>{t("connections.googleHelp")}</p></div>
+            <button disabled={busy} onClick={() => void connectGoogle()}>
+              {t(activeGoogleConnections.length > 0 ? "connections.addGoogleAccount" : "connections.connectGoogle")}
+            </button>
+          </section>
+          <section className="connection-actions">
+            <div><strong>GitHub</strong><p>{t("connections.githubHelp")}</p></div>
+            <button disabled={busy} onClick={() => void connectGitHub()}>
+              {t(activeGitHubConnections.length > 0 ? "connections.addGitHubAccount" : "connections.connectGitHub")}
+            </button>
+          </section>
+        </>}
       {tab === "tasks" &&
         <form onSubmit={(event) => { void submit(event); }} className="memory-form">
           <input name="title" required maxLength={500} placeholder={t("tasks.placeholder")} />
@@ -505,7 +529,7 @@ export function App() {
                       <div>
                         {tab === "connections"
                           ? <>
-                              <strong>{t("connections.destination")}: {display(item["providerId"], "Google")}</strong>
+                              <strong>{t("connections.destination")}: {display(item["providerId"], t("connections.unknownService"))}</strong>
                               <p>{t("connections.account")}: {display(
                                 item["accountLabel"] ?? item["connectionId"],
                                 t("connections.unknownAccount"),

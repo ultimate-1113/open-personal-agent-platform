@@ -31,7 +31,9 @@ Delegated principals may only read sources explicitly published to them.
 
 ## Not implemented yet
 
-Google, GitHub, and Discord connectors, the public Knowledge API, MCP, generated SDK, and dynamic Sandbox plugins are planned for later phases.
+The Google Personal Connector is available.
+The GitHub Personal Connector is implemented and awaiting staging GitHub App configuration.
+Discord, the public Knowledge API, MCP, the generated SDK, and dynamic Sandbox plugins remain in later phases.
 GitHub code changes, payments, multiple owners, and multi-tenancy are outside the v0.1 scope.
 Gmail sending is available only through an exact-content owner approval.
 
