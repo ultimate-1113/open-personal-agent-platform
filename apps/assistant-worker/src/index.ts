@@ -859,6 +859,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         `${connection.connectionId}: ${connection.accountLabel ?? "GitHub account"}`).join("; ") };
     const base = { connectionId: connectionProperty };
     return [
+      { name: "github_repositories_list",
+        description: "List repositories accessible through the owner's GitHub App user connection.",
+        parameters: { type: "object", properties: base, required: ["connectionId"] } },
       { name: "github_inbox_list", description: "List open subscribed GitHub issues and pull requests, newest updates first.",
         parameters: { type: "object", properties: base, required: ["connectionId"] } },
       { name: "github_issues_search", description: "Search GitHub issues and pull requests.",
@@ -900,6 +903,10 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const repository = call.arguments["repository"];
     const issueNumber = call.arguments["issueNumber"];
     const body = call.arguments["body"];
+    if (call.name === "github_repositories_list") {
+      return `GitHub Repository（モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
+        "/internal/v1/github/repositories/list", {}), null, 2)}`;
+    }
     if (call.name === "github_inbox_list") {
       return `GitHub受信箱（購読中のIssueとPull Request、モデルへ再送していません）:\n${JSON.stringify(await githubFetch(
         "/internal/v1/github/inbox/list", {}), null, 2)}`;
@@ -1222,7 +1229,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         ...(tools.length > 0
           ? [{
               role: "system" as const,
-              content: "You are the owner's personal agent. Use available Google and GitHub tools when needed. Subscribed GitHub issues, pull requests, and their comments are inbound messages to handle. Never claim a write completed when it only requested approval.",
+              content: "You are the owner's personal agent. Use available Google and GitHub tools when needed. Use github_repositories_list for questions about accessible repositories; github_inbox_list is only for subscribed issue and pull-request updates. Never claim a write completed when it only requested approval.",
             }]
           : []),
         { role: "user", content },
