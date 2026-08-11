@@ -1,4 +1,6 @@
 import { sha256Hex } from "@opap/security";
+import { createRequestDigest, issueExecutionLease } from "@opap/approval";
+import { importJWK, type JWK } from "jose";
 import {
   DEFAULT_OWNER_MODEL_SETTINGS,
   cloudCostPolicySchema,
@@ -6,10 +8,15 @@ import {
   modelProviderSettingSchema,
   ownerModelSettingsSchema,
   type ModelProviderSetting,
+  type JsonValue,
 } from "@opap/contracts";
 import { evaluateDelegatedSourceAcl, type JwtClaims } from "@opap/identity";
 
-type Bindings = { CONTROL_DB: D1Database; AUDIT_LEDGER: DurableObjectNamespace };
+type Bindings = {
+  CONTROL_DB: D1Database;
+  AUDIT_LEDGER: DurableObjectNamespace;
+  EXECUTION_LEASE_PRIVATE_JWK: string;
+};
 
 type OwnerAuthenticationInput = {
   deploymentId: string;
@@ -43,6 +50,9 @@ type ApprovalRow = {
   expires_at: string;
   decided_at: string | null;
   decision_idempotency_key: string | null;
+  request_json: string | null;
+  task_id: string | null;
+  gatekeeper_id: string | null;
 };
 
 type ProviderSettingRow = {
@@ -240,7 +250,8 @@ async function listApprovals(request: Request, env: Bindings): Promise<Response>
   }
   const result = await env.CONTROL_DB.prepare(
     `SELECT approval_id, principal_id, capability_id, request_digest, preview_json,
-            status, created_at, expires_at, decided_at, decision_idempotency_key
+            status, created_at, expires_at, decided_at, decision_idempotency_key,
+            request_json, task_id, gatekeeper_id
      FROM approvals WHERE deployment_id = ? AND principal_id = ?
      ORDER BY created_at DESC LIMIT 100`,
   ).bind(deploymentId, principalId).all<ApprovalRow>();
@@ -260,10 +271,21 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     typeof input["requestDigest"] !== "string" ||
     !/^[a-f0-9]{64}$/u.test(input["requestDigest"]) ||
     typeof input["preview"] !== "object" || input["preview"] === null ||
+    typeof input["request"] !== "object" || input["request"] === null ||
+    typeof input["taskId"] !== "string" ||
+    input["gatekeeperId"] !== "gatekeeper:google-personal" ||
     typeof input["requestId"] !== "string"
     || typeof input["idempotencyKey"] !== "string"
   ) {
     return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  if (input["capabilityId"] !== "google.gmail.drafts.create" &&
+    input["capabilityId"] !== "google.calendar.events.create") {
+    return Response.json({ code: "CAPABILITY_NOT_ALLOWED" }, { status: 403 });
+  }
+  const operationRequest = input["request"] as JsonValue;
+  if (await createRequestDigest(operationRequest) !== input["requestDigest"]) {
+    return Response.json({ code: "REQUEST_DIGEST_MISMATCH" }, { status: 409 });
   }
   const now = new Date();
   const approvalId = `approval:${crypto.randomUUID()}`;
@@ -271,11 +293,12 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
   await env.CONTROL_DB.prepare(
     `INSERT INTO approvals
      (deployment_id, approval_id, principal_id, capability_id, request_digest,
-      preview_json, status, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      preview_json, status, created_at, expires_at, request_json, task_id, gatekeeper_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
   ).bind(
     input["deploymentId"], approvalId, input["principalId"], input["capabilityId"],
     input["requestDigest"], JSON.stringify(input["preview"]), now.toISOString(), expiresAt,
+    JSON.stringify(operationRequest), input["taskId"], input["gatekeeperId"],
   ).run();
   const audited = await audit(env, {
     deploymentId: input["deploymentId"],
@@ -315,7 +338,8 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
   }
   const current = await env.CONTROL_DB.prepare(
     `SELECT approval_id, principal_id, capability_id, request_digest, preview_json,
-            status, created_at, expires_at, decided_at, decision_idempotency_key
+            status, created_at, expires_at, decided_at, decision_idempotency_key,
+            request_json, task_id, gatekeeper_id
      FROM approvals WHERE deployment_id = ? AND approval_id = ? AND principal_id = ?`,
   ).bind(input["deploymentId"], input["approvalId"], input["principalId"]).first<ApprovalRow>();
   if (!current) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
@@ -348,12 +372,34 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
     metadata: { approvalId: input["approvalId"], decision: input["decision"] },
   });
   if (!audited) return Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
-  return Response.json(approvalJson({
+  const decided = approvalJson({
     ...current,
     status: input["decision"],
     decided_at: now,
     decision_idempotency_key: String(input["idempotencyKey"]),
-  }));
+  });
+  if (input["decision"] !== "approved") return Response.json(decided);
+  if (!current.request_json || !current.task_id || !current.gatekeeper_id) {
+    return Response.json({ code: "APPROVAL_EXECUTION_DATA_MISSING" }, { status: 503 });
+  }
+  const requestValue = JSON.parse(current.request_json) as JsonValue;
+  const keyValue: unknown = JSON.parse(env.EXECUTION_LEASE_PRIVATE_JWK);
+  if (typeof keyValue !== "object" || keyValue === null || Array.isArray(keyValue)) {
+    return Response.json({ code: "LEASE_KEY_INVALID" }, { status: 503 });
+  }
+  const privateKey = await importJWK(keyValue as JWK, "EdDSA");
+  const executionLease = await issueExecutionLease({
+    issuer: `control:${input["deploymentId"]}`,
+    principalId: input["principalId"],
+    capabilityId: current.capability_id,
+    gatekeeperId: current.gatekeeper_id,
+    taskId: current.task_id,
+    request: requestValue,
+    grantVersion: 1,
+    policyVersion: 1,
+    approvalId: current.approval_id,
+  }, privateKey);
+  return Response.json({ ...decided, executionLease, executionRequest: requestValue });
 }
 
 async function listAudit(request: Request, env: Bindings): Promise<Response> {

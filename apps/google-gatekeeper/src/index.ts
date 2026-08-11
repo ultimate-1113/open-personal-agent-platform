@@ -6,11 +6,23 @@ import {
   exchangeAuthorizationCode,
   oauthStateDigest,
   openTransientSecret,
+  refreshAccessToken,
   revokeAccessToken,
   sealTransientSecret,
   verifyAuthorizationCallback,
   type OAuthTransaction,
 } from "@opap/oauth-core";
+import {
+  createCalendarEvent,
+  createGmailDraft,
+  getGmailMessage,
+  GoogleApiError,
+  listCalendarEvents,
+  searchDrive,
+  searchGmail,
+} from "@opap/google-connector";
+import { verifyExecutionLease } from "@opap/approval";
+import { importJWK, type JWK } from "jose";
 
 type Bindings = {
   ENVIRONMENT: string;
@@ -19,6 +31,8 @@ type Bindings = {
   GOOGLE_CLIENT_SECRET: string;
   CREDENTIAL_KEK: string;
   CREDENTIAL_KEY_ID: string;
+  EXECUTION_LEASE_PUBLIC_JWK: string;
+  GMAIL_DRAFT_ALLOWED_RECIPIENTS: string;
 };
 
 export const GOOGLE_PERSONAL_SCOPES = [
@@ -40,6 +54,14 @@ type TransactionRow = {
   redirect_uri: string;
   expires_at: string;
   consumed_at: string | null;
+};
+
+type CredentialRow = {
+  connection_id: string;
+  key_id: string;
+  wrapped_data_key: string;
+  nonce: string;
+  ciphertext: string;
 };
 
 type GoogleIdentity = {
@@ -84,6 +106,210 @@ const objectBody = async (request: Request): Promise<Record<string, unknown> | u
     ? value as Record<string, unknown>
     : undefined;
 };
+
+const activeCredential = async (
+  env: Bindings,
+  deploymentId: string,
+  connectionId: string,
+) => {
+  const row = await env.GATEKEEPER_DB.prepare(
+    `SELECT c.connection_id, e.key_id, e.wrapped_data_key, e.nonce, e.ciphertext
+     FROM connections c JOIN encrypted_credentials e
+       ON e.deployment_id = c.deployment_id AND e.connection_id = c.connection_id
+     WHERE c.deployment_id = ? AND c.connection_id = ? AND c.provider_id = 'google'
+       AND c.connection_kind = 'personal' AND c.status = 'active'`,
+  ).bind(deploymentId, connectionId).first<CredentialRow>();
+  if (!row) return undefined;
+  let credential = await decryptCredential({
+    envelope: {
+      keyId: row.key_id,
+      wrappedDataKey: row.wrapped_data_key,
+      nonce: row.nonce,
+      ciphertext: row.ciphertext,
+    },
+    kek: env.CREDENTIAL_KEK,
+    deploymentId,
+    connectionId,
+  });
+  const expiry = credential.expiresAt ? Date.parse(credential.expiresAt) : Number.POSITIVE_INFINITY;
+  if (expiry <= Date.now() + 60_000) {
+    credential = await refreshAccessToken({
+      provider: OAUTH_PROVIDERS.google,
+      clientId: env.GOOGLE_CLIENT_ID,
+      clientSecret: env.GOOGLE_CLIENT_SECRET,
+      credential,
+      now: new Date(),
+    });
+    const envelope = await encryptCredential({
+      credential,
+      kek: env.CREDENTIAL_KEK,
+      keyId: env.CREDENTIAL_KEY_ID,
+      deploymentId,
+      connectionId,
+    });
+    await env.GATEKEEPER_DB.prepare(
+      `UPDATE encrypted_credentials SET key_id = ?, wrapped_data_key = ?, nonce = ?,
+         ciphertext = ?, rotated_at = ? WHERE deployment_id = ? AND connection_id = ?`,
+    ).bind(envelope.keyId, envelope.wrappedDataKey, envelope.nonce, envelope.ciphertext,
+      new Date().toISOString(), deploymentId, connectionId).run();
+  }
+  return credential;
+};
+
+async function googleRead(request: Request, env: Bindings, operation: string): Promise<Response> {
+  const body = await objectBody(request);
+  if (!body || typeof body["deploymentId"] !== "string" ||
+    typeof body["connectionId"] !== "string") return json({ code: "INVALID_REQUEST" }, 400);
+  const credential = await activeCredential(env, body["deploymentId"], body["connectionId"]);
+  if (!credential) return json({ code: "GOOGLE_CONNECTION_NOT_FOUND" }, 404);
+  const options = { accessToken: credential.accessToken };
+  if (operation === "gmail.search") {
+    if (typeof body["query"] !== "string" || body["query"].length > 2_048) {
+      return json({ code: "INVALID_REQUEST" }, 400);
+    }
+    return json(await searchGmail({
+      query: body["query"],
+      ...(typeof body["maxResults"] === "number" ? { maxResults: body["maxResults"] } : {}),
+    }, options));
+  }
+  if (operation === "gmail.get") {
+    if (typeof body["messageId"] !== "string" || !/^[A-Za-z0-9_-]{1,256}$/u.test(body["messageId"])) {
+      return json({ code: "INVALID_REQUEST" }, 400);
+    }
+    return json(await getGmailMessage(body["messageId"], options));
+  }
+  if (operation === "calendar.events.list") {
+    const timeMin = body["timeMin"];
+    const timeMax = body["timeMax"];
+    if ((timeMin !== undefined && (typeof timeMin !== "string" || Number.isNaN(Date.parse(timeMin)))) ||
+      (timeMax !== undefined && (typeof timeMax !== "string" || Number.isNaN(Date.parse(timeMax))))) {
+      return json({ code: "INVALID_REQUEST" }, 400);
+    }
+    return json(await listCalendarEvents({
+      ...(typeof body["calendarId"] === "string" ? { calendarId: body["calendarId"] } : {}),
+      ...(typeof timeMin === "string" ? { timeMin } : {}),
+      ...(typeof timeMax === "string" ? { timeMax } : {}),
+      ...(typeof body["maxResults"] === "number" ? { maxResults: body["maxResults"] } : {}),
+    }, options));
+  }
+  if (operation === "drive.files.search") {
+    if (body["query"] !== undefined &&
+      (typeof body["query"] !== "string" || body["query"].length > 2_048)) {
+      return json({ code: "INVALID_REQUEST" }, 400);
+    }
+    return json(await searchDrive({
+      ...(typeof body["query"] === "string" ? { query: body["query"] } : {}),
+      ...(typeof body["pageSize"] === "number" ? { pageSize: body["pageSize"] } : {}),
+    }, options));
+  }
+  return json({ code: "CAPABILITY_NOT_FOUND" }, 404);
+}
+
+const allowedRecipients = (env: Bindings): Set<string> =>
+  new Set(env.GMAIL_DRAFT_ALLOWED_RECIPIENTS.split(",")
+    .map((value) => value.trim().toLowerCase()).filter(Boolean));
+
+const writeInput = (
+  capabilityId: string,
+  value: unknown,
+  env: Bindings,
+): Record<string, string> | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (typeof input["connectionId"] !== "string") return undefined;
+  if (capabilityId === "google.gmail.drafts.create") {
+    if (typeof input["to"] !== "string" || typeof input["subject"] !== "string" ||
+      typeof input["body"] !== "string" || input["subject"].length > 998 ||
+      input["body"].length > 65_536 ||
+      !allowedRecipients(env).has(input["to"].toLowerCase())) return undefined;
+    return {
+      connectionId: input["connectionId"], to: input["to"],
+      subject: input["subject"], body: input["body"],
+    };
+  }
+  if (capabilityId === "google.calendar.events.create") {
+    if (typeof input["summary"] !== "string" || input["summary"].length > 1_000 ||
+      typeof input["start"] !== "string" || Number.isNaN(Date.parse(input["start"])) ||
+      typeof input["end"] !== "string" || Number.isNaN(Date.parse(input["end"])) ||
+      Date.parse(input["end"]) <= Date.parse(input["start"]) ||
+      (input["description"] !== undefined &&
+        (typeof input["description"] !== "string" || input["description"].length > 8_192)) ||
+      (input["timeZone"] !== undefined && typeof input["timeZone"] !== "string")) return undefined;
+    return {
+      connectionId: input["connectionId"], summary: input["summary"],
+      start: input["start"], end: input["end"],
+      ...(typeof input["description"] === "string" ? { description: input["description"] } : {}),
+      ...(typeof input["timeZone"] === "string" ? { timeZone: input["timeZone"] } : {}),
+    };
+  }
+  return undefined;
+};
+
+async function googleWrite(request: Request, env: Bindings): Promise<Response> {
+  const body = await objectBody(request);
+  if (!body || typeof body["deploymentId"] !== "string" ||
+    typeof body["principalId"] !== "string" || typeof body["capabilityId"] !== "string" ||
+    typeof body["lease"] !== "string") return json({ code: "INVALID_REQUEST" }, 400);
+  const input = writeInput(body["capabilityId"], body["input"], env);
+  if (!input) return json({ code: "INVALID_CAPABILITY_INPUT" }, 400);
+  const keyValue: unknown = JSON.parse(env.EXECUTION_LEASE_PUBLIC_JWK);
+  if (typeof keyValue !== "object" || keyValue === null || Array.isArray(keyValue)) {
+    return json({ code: "LEASE_KEY_INVALID" }, 503);
+  }
+  const publicKey = await importJWK(keyValue as JWK, "EdDSA");
+  const claims = await verifyExecutionLease(body["lease"], publicKey, {
+    issuer: `control:${body["deploymentId"]}`,
+    principalId: body["principalId"],
+    capabilityId: body["capabilityId"],
+    gatekeeperId: "gatekeeper:google-personal",
+    request: input,
+  });
+  if (!claims.approvalId) return json({ code: "APPROVAL_REQUIRED" }, 403);
+  const consumed = await env.GATEKEEPER_DB.prepare(
+    `INSERT OR IGNORE INTO execution_nonces
+     (deployment_id, nonce, capability_id, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?)`,
+  ).bind(body["deploymentId"], claims.jti, body["capabilityId"],
+    new Date(claims.exp * 1_000).toISOString(), new Date().toISOString()).run();
+  if (consumed.meta.changes !== 1) return json({ code: "EXECUTION_LEASE_REPLAY" }, 409);
+  await env.GATEKEEPER_DB.prepare(
+    `INSERT INTO idempotency_records
+     (deployment_id, idempotency_key, capability_id, request_digest, status,
+      provider_request_id, result_reference, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'claimed', NULL, NULL, ?, ?)`,
+  ).bind(body["deploymentId"], claims.jti, body["capabilityId"], claims.requestDigest,
+    new Date().toISOString(), new Date().toISOString()).run();
+  const credential = await activeCredential(env, body["deploymentId"], input["connectionId"] ?? "");
+  if (!credential) return json({ code: "GOOGLE_CONNECTION_NOT_FOUND" }, 404);
+  try {
+    const value = body["capabilityId"] === "google.gmail.drafts.create"
+      ? await createGmailDraft({
+          to: input["to"] ?? "", subject: input["subject"] ?? "", body: input["body"] ?? "",
+        }, { accessToken: credential.accessToken })
+      : await createCalendarEvent({
+          summary: input["summary"] ?? "", start: input["start"] ?? "", end: input["end"] ?? "",
+          ...(input["description"] ? { description: input["description"] } : {}),
+          ...(input["timeZone"] ? { timeZone: input["timeZone"] } : {}),
+        }, { accessToken: credential.accessToken });
+    const result = typeof value === "object" && value !== null
+      ? value as Record<string, unknown>
+      : {};
+    const providerRequestId = typeof result["id"] === "string" ? result["id"] : null;
+    await env.GATEKEEPER_DB.prepare(
+      `UPDATE idempotency_records SET status = 'succeeded', provider_request_id = ?,
+         result_reference = ?, updated_at = ? WHERE deployment_id = ? AND idempotency_key = ?`,
+    ).bind(providerRequestId, providerRequestId, new Date().toISOString(),
+      body["deploymentId"], claims.jti).run();
+    return json({ status: "succeeded", value });
+  } catch (error) {
+    const status = error instanceof GoogleApiError ? "failed" : "unknown";
+    await env.GATEKEEPER_DB.prepare(
+      `UPDATE idempotency_records SET status = ?, updated_at = ?
+       WHERE deployment_id = ? AND idempotency_key = ?`,
+    ).bind(status, new Date().toISOString(), body["deploymentId"], claims.jti).run();
+    return json({ code: status === "unknown" ? "EXTERNAL_WRITE_UNKNOWN" : "GOOGLE_WRITE_FAILED" },
+      status === "unknown" ? 409 : 502);
+  }
+}
 
 async function start(request: Request, env: Bindings): Promise<Response> {
   const body = await objectBody(request);
@@ -303,6 +529,21 @@ export default {
     if (request.method === "POST" && path === "/internal/v1/oauth/callback") return callback(request, env);
     if (request.method === "GET" && path === "/internal/v1/connections") return list(request, env);
     if (request.method === "DELETE" && path === "/internal/v1/connections") return disconnect(request, env);
+    if (request.method === "POST" && path === "/internal/v1/google/gmail/search") {
+      return googleRead(request, env, "gmail.search");
+    }
+    if (request.method === "POST" && path === "/internal/v1/google/gmail/messages/get") {
+      return googleRead(request, env, "gmail.get");
+    }
+    if (request.method === "POST" && path === "/internal/v1/google/calendar/events/list") {
+      return googleRead(request, env, "calendar.events.list");
+    }
+    if (request.method === "POST" && path === "/internal/v1/google/drive/files/search") {
+      return googleRead(request, env, "drive.files.search");
+    }
+    if (request.method === "POST" && path === "/internal/v1/google/execute") {
+      return googleWrite(request, env);
+    }
     return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
   },
 } satisfies ExportedHandler<Bindings>;

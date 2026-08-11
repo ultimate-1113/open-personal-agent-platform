@@ -64,6 +64,7 @@ export function App() {
   const [data, setData] = useState<ApiRecord>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [googleResult, setGoogleResult] = useState<ApiRecord>();
   const loadSequence = useRef(0);
   const request = useCallback(
     (path: string, init?: RequestInit) =>
@@ -245,6 +246,69 @@ export function App() {
     }
   };
 
+  const readGoogle = async (
+    connectionId: string,
+    source: "gmail" | "calendar" | "drive",
+  ) => {
+    setBusy(true);
+    setError("");
+    try {
+      const path = source === "gmail"
+        ? `/v1/google/${encodeURIComponent(connectionId)}/gmail/search`
+        : source === "calendar"
+          ? `/v1/google/${encodeURIComponent(connectionId)}/calendar/events/search`
+          : `/v1/google/${encodeURIComponent(connectionId)}/drive/search`;
+      const body = source === "gmail"
+        ? { query: "newer_than:30d", maxResults: 10 }
+        : source === "calendar"
+          ? { maxResults: 10 }
+          : { query: "trashed = false", pageSize: 10 };
+      setGoogleResult(await request(path, { method: "POST", body: JSON.stringify(body) }));
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const requestGoogleWrite = async (
+    event: FormEvent<HTMLFormElement>,
+    connectionId: string,
+    kind: "draft" | "event",
+  ) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError("");
+    try {
+      const path = kind === "draft"
+        ? `/v1/google/${encodeURIComponent(connectionId)}/gmail/drafts`
+        : `/v1/google/${encodeURIComponent(connectionId)}/calendar/events`;
+      const body = kind === "draft"
+        ? {
+            to: formText(form, "to"),
+            subject: formText(form, "subject"),
+            body: formText(form, "body"),
+          }
+        : {
+            summary: formText(form, "summary"),
+            start: new Date(formText(form, "start")).toISOString(),
+            end: new Date(formText(form, "end")).toISOString(),
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          };
+      await request(path, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify(body),
+      });
+      setTab("approvals");
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const collection = tab === "tasks"
     ? rows(data["tasks"])
     : tab === "memory"
@@ -271,6 +335,9 @@ export function App() {
   const activeGoogleConnections = tab === "connections"
     ? collection.filter((connection) =>
         connection["providerId"] === "google" && connection["status"] === "active")
+    : [];
+  const gmailDraftRecipients = Array.isArray(data["gmailDraftAllowedRecipients"])
+    ? data["gmailDraftAllowedRecipients"].filter((value): value is string => typeof value === "string")
     : [];
   const activeTab = tabs.find((item) => item.id === tab);
 
@@ -404,6 +471,9 @@ export function App() {
                                 t("item.fallback"),
                               )}</strong>
                               <p>{display(item["value"] ?? item["content"] ?? item["status"] ?? item["outcome"])}</p>
+                              {tab === "approvals" && typeof item["preview"] === "object" &&
+                                item["preview"] !== null &&
+                                <pre className="policy">{JSON.stringify(item["preview"], null, 2)}</pre>}
                             </>}
                       </div>
                       {tab === "approvals" && item["status"] === "pending" &&
@@ -417,6 +487,15 @@ export function App() {
                         </div>}
                       {tab === "connections" && item["status"] === "active" &&
                         <div className="actions">
+                          <button disabled={busy} onClick={() => void readGoogle(display(item["connectionId"]), "gmail")}>
+                            {t("connections.recentMail")}
+                          </button>
+                          <button disabled={busy} onClick={() => void readGoogle(display(item["connectionId"]), "calendar")}>
+                            {t("connections.upcomingEvents")}
+                          </button>
+                          <button disabled={busy} onClick={() => void readGoogle(display(item["connectionId"]), "drive")}>
+                            {t("connections.recentDrive")}
+                          </button>
                           <button className="danger" disabled={busy} onClick={() => void disconnect(display(item["connectionId"]))}>
                             {t("connections.disconnect")}
                           </button>
@@ -424,6 +503,38 @@ export function App() {
                     </article>
                   )}
             </section>}
+      {tab === "connections" && googleResult &&
+        <section>
+          <h2>{t("connections.readResult")}</h2>
+          <pre className="policy">{JSON.stringify(googleResult, null, 2)}</pre>
+        </section>}
+      {tab === "connections" && activeGoogleConnections[0] &&
+        <section className="cards">
+          <article>
+            <form className="memory-form" onSubmit={(event) => void requestGoogleWrite(
+              event, display(activeGoogleConnections[0]?.["connectionId"]), "draft",
+            )}>
+              <strong>{t("connections.createDraft")}</strong>
+              <select name="to" required defaultValue={gmailDraftRecipients[0] ?? ""}>
+                {gmailDraftRecipients.map((recipient) => <option key={recipient} value={recipient}>{recipient}</option>)}
+              </select>
+              <input name="subject" required maxLength={998} placeholder={t("connections.subject")} />
+              <textarea name="body" required maxLength={65536} placeholder={t("connections.body")} />
+              <button disabled={busy}>{t("connections.requestApproval")}</button>
+            </form>
+          </article>
+          <article>
+            <form className="memory-form" onSubmit={(event) => void requestGoogleWrite(
+              event, display(activeGoogleConnections[0]?.["connectionId"]), "event",
+            )}>
+              <strong>{t("connections.createEvent")}</strong>
+              <input name="summary" required maxLength={1000} placeholder={t("connections.summary")} />
+              <label>{t("connections.start")}<input name="start" type="datetime-local" required /></label>
+              <label>{t("connections.end")}<input name="end" type="datetime-local" required /></label>
+              <button disabled={busy}>{t("connections.requestApproval")}</button>
+            </form>
+          </article>
+        </section>}
       {tab === "providers" && <>
         <form
           key={`${activeProviderId}:${workersAiAllowed}`}

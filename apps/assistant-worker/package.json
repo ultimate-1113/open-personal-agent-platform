@@ -9,6 +9,7 @@
     "dev": "wrangler dev"
   },
   "dependencies": {
+    "@opap/approval": "workspace:*",
     "@opap/contracts": "workspace:*",
     "@opap/cost-control": "workspace:*",
     "@opap/identity": "workspace:*",

@@ -5,7 +5,9 @@ import {
   type CloudCostPolicy,
   type OwnerModelSettings,
   type UsageRecord,
+  type JsonValue,
 } from "@opap/contracts";
+import { createRequestDigest } from "@opap/approval";
 import { IdentityError, JwtVerifier } from "@opap/identity";
 import { sha256Hex } from "@opap/security";
 import {
@@ -38,6 +40,7 @@ type Bindings = {
   AI?: WorkersAiBinding;
   WORKERS_AI_MODEL?: string;
   AI_GATEWAY_ID?: string;
+  GMAIL_DRAFT_ALLOWED_RECIPIENTS?: string;
 };
 
 type AssistantEnv = {
@@ -364,12 +367,23 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   }
   app.use("/v1/connections", authorizeConversation);
   app.use("/v1/connections/*", authorizeConversation);
+  app.use("/v1/google", authorizeConversation);
+  app.use("/v1/google/*", authorizeConversation);
 
   app.get("/v1/connections", async (context) => {
     const url = new URL("https://google-gatekeeper.internal/internal/v1/connections");
     url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
     const response = await context.env.GOOGLE_GATEKEEPER.fetch(url);
-    return new Response(response.body, response);
+    if (!response.ok) return new Response(response.body, response);
+    const value: unknown = await response.json();
+    const result = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+    return context.json({
+      ...result,
+      gmailDraftAllowedRecipients: (context.env.GMAIL_DRAFT_ALLOWED_RECIPIENTS ?? "")
+        .split(",").map((recipient) => recipient.trim()).filter(Boolean),
+    });
   });
 
   app.post("/v1/connections/google/start", async (context) => {
@@ -420,6 +434,124 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       },
     );
     return new Response(response.body, response);
+  });
+
+  const forwardGoogleRead = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
+    internalPath: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<Response> => {
+    const value: unknown = await context.req.json().catch(() => ({}));
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const response = await context.env.GOOGLE_GATEKEEPER.fetch(
+      `https://google-gatekeeper.internal${internalPath}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(value as Record<string, unknown>),
+          ...extra,
+          deploymentId: context.env.DEPLOYMENT_ID,
+          connectionId: context.req.param("connectionId"),
+        }),
+      },
+    );
+    return new Response(response.body, {
+      status: response.status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+    });
+  };
+
+  app.post("/v1/google/:connectionId/gmail/search", (context) =>
+    forwardGoogleRead(context, "/internal/v1/google/gmail/search"));
+  app.post("/v1/google/:connectionId/gmail/messages/:messageId", (context) =>
+    forwardGoogleRead(context, "/internal/v1/google/gmail/messages/get", {
+      messageId: context.req.param("messageId"),
+    }));
+  app.post("/v1/google/:connectionId/calendar/events/search", (context) =>
+    forwardGoogleRead(context, "/internal/v1/google/calendar/events/list"));
+  app.post("/v1/google/:connectionId/drive/search", (context) =>
+    forwardGoogleRead(context, "/internal/v1/google/drive/files/search"));
+
+  const requestGoogleWriteApproval = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
+    capabilityId: "google.gmail.drafts.create" | "google.calendar.events.create",
+    operationRequest: Record<string, JsonValue>,
+    preview: Record<string, JsonValue>,
+  ): Promise<Response> => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/approvals",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"),
+          capabilityId,
+          gatekeeperId: "gatekeeper:google-personal",
+          taskId: `task:${crypto.randomUUID()}`,
+          request: operationRequest,
+          requestDigest: await createRequestDigest(operationRequest),
+          preview,
+          requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
+          idempotencyKey,
+        }),
+      },
+    );
+    return new Response(response.body, response);
+  };
+
+  app.post("/v1/google/:connectionId/gmail/drafts", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const body = value as Record<string, unknown>;
+    const recipients = new Set((context.env.GMAIL_DRAFT_ALLOWED_RECIPIENTS ?? "")
+      .split(",").map((recipient) => recipient.trim().toLowerCase()).filter(Boolean));
+    if (typeof body["to"] !== "string" || !recipients.has(body["to"].toLowerCase()) ||
+      typeof body["subject"] !== "string" || body["subject"].length > 998 ||
+      typeof body["body"] !== "string" || body["body"].length > 65_536) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const operationRequest = {
+      connectionId: context.req.param("connectionId"),
+      to: body["to"], subject: body["subject"], body: body["body"],
+    };
+    return requestGoogleWriteApproval(context, "google.gmail.drafts.create", operationRequest, {
+      destination: body["to"], operation: "Create Gmail draft",
+      subject: body["subject"], bodyPreview: body["body"].slice(0, 500),
+    });
+  });
+
+  app.post("/v1/google/:connectionId/calendar/events", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const body = value as Record<string, unknown>;
+    if (typeof body["summary"] !== "string" || body["summary"].length > 1_000 ||
+      typeof body["start"] !== "string" || Number.isNaN(Date.parse(body["start"])) ||
+      typeof body["end"] !== "string" || Number.isNaN(Date.parse(body["end"])) ||
+      Date.parse(body["end"]) <= Date.parse(body["start"]) ||
+      (body["description"] !== undefined && typeof body["description"] !== "string") ||
+      (body["timeZone"] !== undefined && typeof body["timeZone"] !== "string")) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const operationRequest: Record<string, JsonValue> = {
+      connectionId: context.req.param("connectionId"), summary: body["summary"],
+      start: body["start"], end: body["end"],
+      ...(typeof body["description"] === "string" ? { description: body["description"] } : {}),
+      ...(typeof body["timeZone"] === "string" ? { timeZone: body["timeZone"] } : {}),
+    };
+    return requestGoogleWriteApproval(context, "google.calendar.events.create", operationRequest, {
+      destination: "Google Calendar", operation: "Create calendar event",
+      summary: body["summary"], start: body["start"], end: body["end"],
+    });
   });
 
   app.get("/v1/settings/budgets", async (context) =>
@@ -860,7 +992,39 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         }),
       },
     );
-    return new Response(response.body, response);
+    if (!response.ok || decision !== "approved") return new Response(response.body, response);
+    const approvalResult: unknown = await response.json();
+    if (typeof approvalResult !== "object" || approvalResult === null ||
+      Array.isArray(approvalResult)) return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
+    const approved = approvalResult as Record<string, unknown>;
+    if (typeof approved["executionLease"] !== "string" ||
+      typeof approved["capabilityId"] !== "string" ||
+      typeof approved["executionRequest"] !== "object" || approved["executionRequest"] === null) {
+      return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
+    }
+    const execution = await context.env.GOOGLE_GATEKEEPER.fetch(
+      "https://google-gatekeeper.internal/internal/v1/google/execute",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"),
+          capabilityId: approved["capabilityId"],
+          lease: approved["executionLease"],
+          input: approved["executionRequest"],
+          requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
+          agentId: "agent:assistant",
+        }),
+      },
+    );
+    const executionResult: unknown = await execution.json().catch(() => ({}));
+    return execution.ok
+      ? context.json({ ...approved, execution: executionResult })
+      : new Response(JSON.stringify(executionResult), {
+          status: execution.status,
+          headers: { "Content-Type": "application/problem+json" },
+        });
   });
 
   app.get("/v1/audit", async (context) => {

@@ -9,10 +9,12 @@
     "dev": "wrangler dev"
   },
   "dependencies": {
+    "@opap/approval": "workspace:*",
     "@opap/contracts": "workspace:*",
     "@opap/identity": "workspace:*",
     "@opap/policy-engine": "workspace:*",
-    "@opap/security": "workspace:*"
+    "@opap/security": "workspace:*",
+    "jose": "^6.1.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251202.0",

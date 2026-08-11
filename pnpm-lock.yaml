@@ -35,6 +35,9 @@ importers:
 
   apps/assistant-worker:
     dependencies:
+      '@opap/approval':
+        specifier: workspace:*
+        version: link:../../packages/approval
       '@opap/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -111,9 +114,18 @@ importers:
 
   apps/google-gatekeeper:
     dependencies:
+      '@opap/approval':
+        specifier: workspace:*
+        version: link:../../packages/approval
+      '@opap/google-connector':
+        specifier: workspace:*
+        version: link:../../packages/google-connector
       '@opap/oauth-core':
         specifier: workspace:*
         version: link:../../packages/oauth-core
+      jose:
+        specifier: ^6.1.3
+        version: 6.2.8
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20251202.0
@@ -146,6 +158,9 @@ importers:
 
   apps/policy-control-worker:
     dependencies:
+      '@opap/approval':
+        specifier: workspace:*
+        version: link:../../packages/approval
       '@opap/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -158,6 +173,9 @@ importers:
       '@opap/security':
         specifier: workspace:*
         version: link:../../packages/security
+      jose:
+        specifier: ^6.1.3
+        version: 6.2.8
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20251202.0
@@ -233,6 +251,8 @@ importers:
       jose:
         specifier: ^6.1.3
         version: 6.2.8
+
+  packages/google-connector: {}
 
   packages/identity:
     dependencies:

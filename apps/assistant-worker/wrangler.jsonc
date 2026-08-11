@@ -13,7 +13,8 @@
     "ACCESS_AUDIENCE": "configure-me",
     "ACCESS_JWKS_URI": "https://example.cloudflareaccess.com/cdn-cgi/access/certs",
     "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
-    "AI_GATEWAY_ID": "default"
+    "AI_GATEWAY_ID": "default",
+    "GMAIL_DRAFT_ALLOWED_RECIPIENTS": ""
   },
   "ai": {
     "binding": "AI"
