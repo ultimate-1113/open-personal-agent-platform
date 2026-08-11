@@ -69,6 +69,7 @@ type AppendAssistantInput = {
   idempotencyKey: string;
   content: string;
   providerId: string;
+  sensitivity?: "normal" | "sensitive";
 };
 
 const isInitializeInput = (value: unknown): value is InitializeInput => {
@@ -146,7 +147,9 @@ const isAppendAssistantInput = (value: unknown): value is AppendAssistantInput =
   const input = value as Record<string, unknown>;
   return typeof input["principalId"] === "string" && typeof input["idempotencyKey"] === "string" &&
     typeof input["content"] === "string" && input["content"].length <= 65_536 &&
-    typeof input["providerId"] === "string";
+    typeof input["providerId"] === "string" &&
+    (input["sensitivity"] === undefined || input["sensitivity"] === "normal" ||
+      input["sensitivity"] === "sensitive");
 };
 
 export class ConversationAgent {
@@ -525,7 +528,8 @@ export class ConversationAgent {
     if (replay) return Response.json(replay);
     const now = new Date().toISOString();
     const policy = informationPolicySchema.parse({
-      subjectPrincipalIds: [input.principalId], visibility: "owner", sensitivity: "sensitive",
+      subjectPrincipalIds: [input.principalId], visibility: "owner",
+      sensitivity: input.sensitivity ?? "sensitive",
       trust: "external", allowedAudienceIds: [input.principalId],
       allowedDestinationIds: [input.providerId], retention: { mode: "until-deleted" },
     });

@@ -256,6 +256,56 @@ export const connectorSummaryMessages = (
   },
 ];
 
+type ConversationContextMessage = { role: "user" | "assistant"; content: string };
+
+export const normalConversationContext = (value: unknown): ConversationContextMessage[] => {
+  const root = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+  const rows = Array.isArray(root?.["messages"]) ? root["messages"] as unknown[] : [];
+  const messages = rows.flatMap((item): ConversationContextMessage[] => {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const policy = typeof row["informationPolicy"] === "object" && row["informationPolicy"] !== null &&
+      !Array.isArray(row["informationPolicy"])
+      ? row["informationPolicy"] as Record<string, unknown> : undefined;
+    return (row["role"] === "user" || row["role"] === "assistant") &&
+      typeof row["content"] === "string" && policy?.["sensitivity"] === "normal"
+      ? [{ role: row["role"], content: row["content"] }] : [];
+  }).slice(-8);
+  let remaining = 12_000;
+  return messages.reverse().flatMap((message): ConversationContextMessage[] => {
+    if (remaining <= 0) return [];
+    const content = message.content.slice(Math.max(0, message.content.length - remaining));
+    remaining -= content.length;
+    return [{ ...message, content }];
+  }).reverse();
+};
+
+export const continuationIntentPrompt = (
+  content: string,
+  history: readonly ConversationContextMessage[],
+): string => {
+  let latestAssistantIndex = -1;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index]?.role === "assistant") {
+      latestAssistantIndex = index;
+      break;
+    }
+  }
+  if (latestAssistantIndex < 1 || content.length > 1_000) return content;
+  const latestAssistant = history[latestAssistantIndex]?.content ?? "";
+  if (!/(?:[?？]|教えて|指定して|必要です|どの|いつ|何時|宛先|リポジトリ|repository|タイトル|本文)/iu
+    .test(latestAssistant)) return content;
+  let previousUser: ConversationContextMessage | undefined;
+  for (let index = latestAssistantIndex - 1; index >= 0; index -= 1) {
+    if (history[index]?.role === "user") {
+      previousUser = history[index];
+      break;
+    }
+  }
+  return previousUser ? `${previousUser.content}\n${content}` : content;
+};
+
 const GOOGLE_TOOL_NAMES = new Set([
   "google_gmail_search",
   "google_calendar_list_events",
@@ -1355,6 +1405,11 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const replay = await stub.fetch(replayUrl);
     if (replay.ok) return new Response(replay.body, replay);
     if (replay.status !== 404) return new Response(replay.body, replay);
+    const stateResponse = await stub.fetch("https://conversation.internal/state").catch(() => undefined);
+    const conversationHistory = stateResponse?.ok
+      ? normalConversationContext(await stateResponse.json().catch(() => ({})))
+      : [];
+    const intentPrompt = continuationIntentPrompt(content, conversationHistory);
 
     let activeProviderId: "provider:mock-local" | "provider:workers-ai";
     let router: ModelRouter;
@@ -1399,7 +1454,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       ...(googleConnections.length > 0 ? googleAgentTools(googleConnections) : []),
       ...(githubConnections.length > 0 ? githubAgentTools(githubConnections) : []),
     ];
-    const intendedToolNames = selectConnectorToolNames(content);
+    const intendedToolNames = selectConnectorToolNames(intentPrompt);
     const tools = availableTools.filter((tool) => intendedToolNames.includes(tool.name));
     const needsGoogle = intendedToolNames.some((name) => GOOGLE_TOOL_NAMES.has(name));
     const needsGitHub = intendedToolNames.some((name) => GITHUB_TOOL_NAMES.has(name));
@@ -1438,6 +1493,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
               content: `You are the owner's personal agent. Current UTC time is ${now.toISOString()}. The available tools have already been restricted to the owner's detected intent. If the request needs external data or an external action, use only the provided tool and never substitute another tool. If a required write parameter is missing or is a placeholder such as 'target repository', ask one concise clarification question without calling a tool. Never claim a write completed when it only requested approval.`,
             }]
           : []),
+        ...conversationHistory,
         { role: "user", content },
       ],
       informationPolicy: {
@@ -2134,6 +2190,10 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const recorded = await recordExecutionOutcome(executionStatus, executionCode);
     const preview = typeof approved["preview"] === "object" && approved["preview"] !== null &&
       !Array.isArray(approved["preview"]) ? approved["preview"] as Record<string, unknown> : {};
+    const executionRequest = approved["executionRequest"] as Record<string, unknown>;
+    const executionValue = typeof executionRecord["value"] === "object" &&
+      executionRecord["value"] !== null && !Array.isArray(executionRecord["value"])
+      ? executionRecord["value"] as Record<string, unknown> : {};
     const conversationId = preview["conversationId"];
     let conversationRecorded = true;
     if (typeof conversationId === "string" && /^conversation:[a-f0-9]{64}$/u.test(conversationId)) {
@@ -2143,8 +2203,20 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         "github.issues.create": execution.ok ? "GitHub Issueを作成しました。" : "GitHub Issueの作成に失敗しました。",
         "github.issue-comments.create": execution.ok ? "GitHubコメントを投稿しました。" : "GitHubコメントの投稿に失敗しました。",
       };
-      const baseMessage = messages[String(approved["capabilityId"])] ??
+      let baseMessage = messages[String(approved["capabilityId"])] ??
         (execution.ok ? "承認された操作を実行しました。" : "承認された操作の実行に失敗しました。");
+      if (execution.ok && approved["capabilityId"] === "github.issues.create" &&
+        typeof executionRequest["repository"] === "string" &&
+        typeof executionValue["number"] === "number") {
+        baseMessage = `${executionRequest["repository"]} にGitHub Issue #${executionValue["number"]}を作成しました。${
+          typeof executionValue["html_url"] === "string" ? `\n${executionValue["html_url"]}` : ""}`;
+      }
+      if (execution.ok && approved["capabilityId"] === "github.issue-comments.create" &&
+        typeof executionRequest["repository"] === "string" &&
+        typeof executionRequest["issueNumber"] === "number") {
+        baseMessage = `${executionRequest["repository"]}#${executionRequest["issueNumber"]} にコメントを投稿しました。${
+          typeof executionValue["html_url"] === "string" ? `\n${executionValue["html_url"]}` : ""}`;
+      }
       const conversation = context.env.CONVERSATIONS.get(
         context.env.CONVERSATIONS.idFromName(conversationId),
       );
@@ -2153,7 +2225,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         body: JSON.stringify({ principalId: context.get("ownerPrincipalId"),
           idempotencyKey: `approval-outcome:${approvalId}`,
           content: executionCode ? `${baseMessage} (${executionCode})` : baseMessage,
-          providerId: "provider:local-format" }),
+          providerId: "provider:local-format", sensitivity: "normal" }),
       });
       conversationRecorded = appended.ok;
     }

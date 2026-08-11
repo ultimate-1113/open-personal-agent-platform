@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   connectorSummaryMessages,
+  continuationIntentPrompt,
   formatConnectorResult,
   githubRepositoryFullNames,
   inferCalendarRange,
+  normalConversationContext,
   selectConnectorToolNames,
 } from "../apps/assistant-worker/src/index.js";
 
@@ -29,6 +31,23 @@ describe("assistant connector output", () => {
       { full_name: "invalid" },
       { name: "missing-owner" },
     ] })).toEqual(["ultimate-1113/open-personal-agent-platform"]);
+  });
+
+  it("continues a write request after answering a clarification", () => {
+    const history = [
+      { role: "user" as const, content: "open-personal-agent-platformにテストIssueを作成して" },
+      { role: "assistant" as const, content: "リポジトリ名をowner/name形式で教えてください。" },
+    ];
+    const prompt = continuationIntentPrompt("ultimate-1113/open-personal-agent-platform", history);
+    expect(selectConnectorToolNames(prompt)).toEqual(["github_issue_create"]);
+  });
+
+  it("excludes sensitive conversation data from automatic model context", () => {
+    expect(normalConversationContext({ messages: [
+      { role: "user", content: "normal", informationPolicy: { sensitivity: "normal" } },
+      { role: "assistant", content: "private connector result",
+        informationPolicy: { sensitivity: "sensitive" } },
+    ] })).toEqual([{ role: "user", content: "normal" }]);
   });
 
   it("limits a Japanese next-year Calendar request to exactly one year", () => {
