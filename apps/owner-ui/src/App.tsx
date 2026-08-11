@@ -8,6 +8,11 @@ type ApprovalFilter = "pending" | "approved" | "all";
 type ConnectorApprovalMode = "manual" | "open" | "auto-read";
 type ApiRecord = Record<string, unknown>;
 
+const storedConnectorApprovalMode = (): ConnectorApprovalMode => {
+  const value = localStorage.getItem("opap.connectorApprovalMode");
+  return value === "open" || value === "auto-read" ? value : "manual";
+};
+
 const tabs: readonly { id: Tab; labelKey: MessageKey }[] = [
   { id: "conversation", labelKey: "tab.conversation" },
   { id: "tasks", labelKey: "tab.tasks" },
@@ -68,7 +73,9 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [editingItem, setEditingItem] = useState<ApiRecord>();
   const [approvalFilter, setApprovalFilter] = useState<ApprovalFilter>("pending");
-  const [connectorApprovalMode, setConnectorApprovalMode] = useState<ConnectorApprovalMode>("manual");
+  const [connectorApprovalMode, setConnectorApprovalMode] = useState<ConnectorApprovalMode>(
+    storedConnectorApprovalMode,
+  );
   const [workersAiActive, setWorkersAiActive] = useState(false);
   const [approvalToolQueries, setApprovalToolQueries] = useState<Record<string, string>>({});
   const [approvalToolSelections, setApprovalToolSelections] = useState<Record<string, string>>({});
@@ -178,17 +185,19 @@ export function App() {
         }
         const assistant = typeof created["assistant"] === "object" && created["assistant"] !== null
           ? created["assistant"] as ApiRecord : {};
-        const approvalMatch = display(assistant["content"]).match(
-          /Connector結果のクラウド送信は承認待ちです[\s\S]*?\((approval:[0-9a-f-]{36})\)/u,
-        );
+        const assistantContent = display(assistant["content"]);
+        const approvalMatch = assistantContent.match(/\((approval:[0-9a-f-]{36})\)/u);
         const approvalId = approvalMatch?.[1];
-        if (workersAiActive && approvalId && connectorApprovalMode === "auto-read") {
+        const isConnectorReadApproval = assistantContent.includes("Connector結果のクラウド送信");
+        if (workersAiActive && approvalId && connectorApprovalMode === "auto-read" &&
+          isConnectorReadApproval) {
           await request(`/v1/approvals/${encodeURIComponent(approvalId)}`, {
             method: "POST",
             headers: { "Idempotency-Key": crypto.randomUUID() },
             body: JSON.stringify({ decision: "approved" }),
           });
-        } else if (workersAiActive && approvalId && connectorApprovalMode === "open") {
+        } else if (workersAiActive && approvalId &&
+          (connectorApprovalMode === "open" || connectorApprovalMode === "auto-read")) {
           setTab("approvals");
           return;
         }
@@ -528,7 +537,11 @@ export function App() {
             {workersAiActive && <select
               value={connectorApprovalMode}
               aria-label={t("conversation.approvalMode")}
-              onChange={(event) => setConnectorApprovalMode(event.currentTarget.value as ConnectorApprovalMode)}
+              onChange={(event) => {
+                const mode = event.currentTarget.value as ConnectorApprovalMode;
+                setConnectorApprovalMode(mode);
+                localStorage.setItem("opap.connectorApprovalMode", mode);
+              }}
             >
               <option value="manual">{t("conversation.approvalManual")}</option>
               <option value="open">{t("conversation.approvalOpen")}</option>
