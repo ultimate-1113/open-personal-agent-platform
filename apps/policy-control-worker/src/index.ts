@@ -96,6 +96,30 @@ const isOwnerInput = (value: unknown): value is OwnerAuthenticationInput => {
   ) && (input["email"] === undefined || typeof input["email"] === "string");
 };
 
+async function recordInternalAudit(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" ||
+    typeof input["principalId"] !== "string" ||
+    input["eventType"] !== "model.connector-data-transfer.approved" ||
+    typeof input["requestId"] !== "string" ||
+    typeof input["metadata"] !== "object" || input["metadata"] === null ||
+    Array.isArray(input["metadata"])) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const recorded = await audit(env, {
+    deploymentId: input["deploymentId"], principalId: input["principalId"],
+    eventType: input["eventType"], outcome: "success", requestId: input["requestId"],
+    metadata: input["metadata"] as Record<string, unknown>,
+  });
+  return recorded
+    ? Response.json({ recorded: true }, { status: 201 })
+    : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+}
+
 async function authenticateOwner(
   request: Request,
   database: D1Database,
@@ -636,6 +660,9 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/internal/v1/audit") {
       return listAudit(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/audit/events") {
+      return recordInternalAudit(request, env);
     }
     if (
       (request.method === "GET" || request.method === "PATCH") &&

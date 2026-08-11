@@ -140,7 +140,10 @@ export function App() {
           {
             method: "POST",
             headers: { "Idempotency-Key": crypto.randomUUID() },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({
+              content,
+              connectorCloudTransferApproved: form.get("connectorCloudTransferApproved") === "on",
+            }),
           },
         );
         if (!conversationId) {
@@ -439,6 +442,10 @@ export function App() {
               if (!busy) event.currentTarget.form?.requestSubmit();
             }}
           />
+          <label className="check connector-consent">
+            <input name="connectorCloudTransferApproved" type="checkbox" disabled={busy} />
+            {t("conversation.connectorCloudConsent")}
+          </label>
           <small className="composer-hint">{t("conversation.keyboardHint")}</small>
           <button disabled={busy}>
             {conversationId ? t("conversation.send") : t("conversation.create")}

@@ -1149,10 +1149,15 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const idempotencyKey = context.req.header("idempotency-key");
     if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
     const value: unknown = await context.req.json().catch(() => null);
-    const content = typeof value === "object" && value !== null && !Array.isArray(value)
-      ? (value as Record<string, unknown>)["content"]
-      : undefined;
+    const requestBody = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown> : undefined;
+    const content = requestBody?.["content"];
+    const connectorCloudTransferApproved = requestBody?.["connectorCloudTransferApproved"] === true;
     if (typeof content !== "string" || content.length === 0 || content.length > 32_768) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    if (requestBody?.["connectorCloudTransferApproved"] !== undefined &&
+      typeof requestBody["connectorCloudTransferApproved"] !== "boolean") {
       return problem(context.req.raw, 400, "INVALID_REQUEST");
     }
     const conversationId = context.req.param("conversationId");
@@ -1331,7 +1336,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         }
       }
       assistantContent = outputs.map(formatConnectorResult).join("\n\n");
-      if (!writeRequested && outputs.length > 0) {
+      if (!writeRequested && outputs.length > 0 &&
+        (activeProviderId !== "provider:workers-ai" || connectorCloudTransferApproved)) {
         const rawToolContent = outputs.join("\n\n");
         const modelToolContent = rawToolContent.length <= 65_536
           ? rawToolContent
@@ -1344,11 +1350,40 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           ],
           informationPolicy: {
             ...modelRequest.informationPolicy,
+            sensitivity: activeProviderId === "provider:workers-ai" ? "sensitive" : "normal",
             trust: "external",
           },
+          ...(activeProviderId === "provider:workers-ai"
+            ? { approvedSensitiveCloudTransfer: true }
+            : {}),
           audience: "owner",
           maxOutputTokens: 1_024,
         };
+        if (activeProviderId === "provider:workers-ai") {
+          const auditResponse = await context.env.CONTROL.fetch(
+            "https://control.internal/internal/v1/audit/events",
+            { method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                deploymentId: context.env.DEPLOYMENT_ID, principalId,
+                eventType: "model.connector-data-transfer.approved",
+                requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
+                metadata: {
+                  destinationId: activeProviderId,
+                  connectorResultBytes: new TextEncoder().encode(modelToolContent).byteLength,
+                  toolIds: generated.toolCalls.slice(0, 3).map((call) => call.name),
+                  idempotencyKey,
+                },
+              }) },
+          );
+          if (!auditResponse.ok) {
+            await releaseReservation(reservation, context.env.DEPLOYMENT_ID);
+            if (aiReservation) {
+              await settleAi(aiReservation, context.env.DEPLOYMENT_ID,
+                estimateWorkersAiNeurons(modelRequest, billedModelOutput)).catch(() => false);
+            }
+            return problem(context.req.raw, 503, "AUDIT_UNAVAILABLE");
+          }
+        }
         if (activeProviderId === "provider:workers-ai" && aiPolicy) {
           const summaryReservation = await reserveAi({
             bindings: context.env, principalId,
