@@ -1,0 +1,16 @@
+{
+  "name": "@opap/model-router",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@opap/contracts": "workspace:*"
+  }
+}

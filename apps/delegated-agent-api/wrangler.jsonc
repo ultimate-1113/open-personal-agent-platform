@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-delegated-agent-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEPLOYMENT_ID": "deployment:default",
+    "DELEGATED_ISSUER": "https://issuer.example.invalid",
+    "DELEGATED_AUDIENCE": "configure-me",
+    "DELEGATED_JWKS_URI": "https://issuer.example.invalid/.well-known/jwks.json"
+  },
+  "services": [
+    {
+      "binding": "CONTROL",
+      "service": "opap-policy-control"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@opap/assistant-worker",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@opap/contracts": "workspace:*",
+    "@opap/cost-control": "workspace:*",
+    "@opap/identity": "workspace:*",
+    "@opap/security": "workspace:*",
+    "@opap/owner-ui": "workspace:*",
+    "@opap/model-router": "workspace:*",
+    "hono": "^4.10.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251202.0",
+    "wrangler": "^4.54.0"
+  }
+}

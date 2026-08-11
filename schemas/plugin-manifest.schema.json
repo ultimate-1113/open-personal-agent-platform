@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opap.dev/schemas/plugin-manifest-v1alpha1.json",
+  "title": "Open Personal Agent Platform Plugin Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "id",
+    "version",
+    "platformVersion",
+    "runtime",
+    "tools",
+    "requestedCapabilityIds",
+    "limits",
+    "artifact"
+  ],
+  "properties": {
+    "apiVersion": { "const": "opap.dev/v1alpha1" },
+    "kind": { "const": "Plugin" },
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$" },
+    "version": { "type": "string", "minLength": 1 },
+    "platformVersion": { "type": "string", "minLength": 1 },
+    "runtime": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "package"],
+          "properties": {
+            "kind": { "const": "static" },
+            "package": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "entrypoint"],
+          "properties": {
+            "kind": { "const": "sandbox-esm" },
+            "entrypoint": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*\\.m?js$"
+            }
+          }
+        }
+      ]
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "description", "inputSchema", "outputSchema"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "inputSchema": { "type": "object" },
+          "outputSchema": { "type": "object" }
+        }
+      }
+    },
+    "requestedCapabilityIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeoutMs", "outputBytes", "concurrency"],
+      "properties": {
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 30000 },
+        "outputBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 2 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "sbomPath"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sbomPath": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

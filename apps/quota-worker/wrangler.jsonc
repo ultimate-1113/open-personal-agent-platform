@@ -1,0 +1,14 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-quota",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["QuotaDurableObject"]
+    }
+  ]
+}

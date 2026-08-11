@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+  - plugins/*/*
+  - examples/*
+
+allowBuilds:
+  esbuild: true
+  workerd: true

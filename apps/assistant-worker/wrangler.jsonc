@@ -1,0 +1,46 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-assistant",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEPLOYMENT_ID": "deployment:default",
+    "OWNER_EMAIL": "owner@example.invalid",
+    "ACCESS_ISSUER": "https://example.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "configure-me",
+    "ACCESS_JWKS_URI": "https://example.cloudflareaccess.com/cdn-cgi/access/certs",
+    "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
+    "AI_GATEWAY_ID": "default"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "services": [
+    {
+      "binding": "CONTROL",
+      "service": "opap-policy-control"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONVERSATIONS",
+        "class_name": "ConversationAgent",
+        "script_name": "opap-conversation-agent"
+      },
+      {
+        "name": "OWNER_QUOTA",
+        "class_name": "QuotaDurableObject",
+        "script_name": "opap-quota"
+      }
+    ]
+  },
+  "assets": {
+    "directory": "../owner-ui/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*", "/health"]
+  }
+}

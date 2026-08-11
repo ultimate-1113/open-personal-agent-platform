@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-policy-control",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "d1_databases": [
+    {
+      "binding": "CONTROL_DB",
+      "database_name": "opap-control-development",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "../../migrations/control"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AUDIT_LEDGER",
+        "class_name": "AuditLedger",
+        "script_name": "opap-audit-ledger"
+      }
+    ]
+  },
+  "vars": {
+    "ENVIRONMENT": "development"
+  }
+}

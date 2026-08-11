@@ -1,0 +1,31 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-public-agent-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEPLOYMENT_ID": "deployment:default"
+  },
+  "ratelimits": [
+    {
+      "name": "PUBLIC_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PUBLIC_QUOTA",
+        "class_name": "QuotaDurableObject",
+        "script_name": "opap-quota"
+      }
+    ]
+  }
+}
