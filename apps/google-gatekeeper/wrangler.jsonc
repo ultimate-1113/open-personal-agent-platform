@@ -6,8 +6,7 @@
   "workers_dev": false,
   "vars": {
     "ENVIRONMENT": "development",
-    "CREDENTIAL_KEY_ID": "kek:development",
-    "GMAIL_DRAFT_ALLOWED_RECIPIENTS": ""
+    "CREDENTIAL_KEY_ID": "kek:development"
   },
   "d1_databases": [{
     "binding": "GATEKEEPER_DB",

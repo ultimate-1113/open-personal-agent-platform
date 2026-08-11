@@ -105,10 +105,7 @@ const base64Url = (value: Uint8Array): string =>
 const encodedHeader = (value: string): string =>
   `=?UTF-8?B?${base64(new TextEncoder().encode(value))}?=`;
 
-export async function createGmailDraft(
-  input: { to: string; subject: string; body: string },
-  options: GoogleRequestOptions,
-): Promise<unknown> {
+const rawGmailMessage = (input: { to: string; subject: string; body: string }): string => {
   const message = [
     `To: ${input.to}`,
     `Subject: ${encodedHeader(input.subject)}`,
@@ -118,6 +115,13 @@ export async function createGmailDraft(
     "",
     input.body,
   ].join("\r\n");
+  return base64Url(new TextEncoder().encode(message));
+};
+
+export async function createGmailDraft(
+  input: { to: string; subject: string; body: string },
+  options: GoogleRequestOptions,
+): Promise<unknown> {
   return googleJson(
     new URL("https://gmail.googleapis.com/gmail/v1/users/me/drafts"),
     "gmail.drafts.create",
@@ -125,7 +129,23 @@ export async function createGmailDraft(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: { raw: base64Url(new TextEncoder().encode(message)) } }),
+      body: JSON.stringify({ message: { raw: rawGmailMessage(input) } }),
+    },
+  );
+}
+
+export async function sendGmailMessage(
+  input: { to: string; subject: string; body: string },
+  options: GoogleRequestOptions,
+): Promise<unknown> {
+  return googleJson(
+    new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages/send"),
+    "gmail.messages.send",
+    options,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ raw: rawGmailMessage(input) }),
     },
   );
 }

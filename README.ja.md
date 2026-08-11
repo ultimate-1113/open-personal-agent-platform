@@ -32,7 +32,8 @@ Delegated Principalは明示的に公開されたSourceだけを読み取れま�
 ## 未実装の機能
 
 Google、GitHub、Discord Connector、公開Knowledge API、MCP、生成SDK、動的Sandbox Pluginは後続Phaseで実装します。
-Gmail送信、GitHubコード変更、決済、複数Owner、複数Tenantはv0.1の対象外です。
+GitHubコード変更、決済、複数Owner、複数Tenantはv0.1の対象外です。
+Gmail送信は、正確な内容をOwnerが承認した場合に限り利用できます。
 
 ## セキュリティ境界
 

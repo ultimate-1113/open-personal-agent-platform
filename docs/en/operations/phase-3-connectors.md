@@ -9,12 +9,14 @@ Phase 3 adds Google, GitHub, and Discord without weakening the worker boundaries
 1. Shared OAuth state, S256 PKCE, token rotation, revocation, and credential envelope encryption
 2. Google Personal and Delegated Source Gatekeepers with separate credentials
 3. GitHub Personal and Delegated Source Gatekeepers with separate GitHub App installations
-4. Always-approved Gmail draft, Calendar event, GitHub issue, and GitHub comment writes
+4. Always-approved Gmail send, Calendar event, GitHub issue, and GitHub comment writes
 5. Discord one-time owner linking, conversation replies, and approval notifications
 6. Reconciliation UI for external writes with an `unknown` result
 
-The shared OAuth foundation is implemented.
-Provider Gatekeepers and their owner-facing connection API remain in progress.
+The shared OAuth foundation and Google Personal Gatekeeper are implemented.
+Gmail messages are sent only after the owner approves the exact recipient, subject, and body.
+Recipient addresses are not restricted by a deployment allowlist.
+Other provider Gatekeepers remain in progress.
 
 ## Security requirements
 

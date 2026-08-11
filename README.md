@@ -32,7 +32,8 @@ Delegated principals may only read sources explicitly published to them.
 ## Not implemented yet
 
 Google, GitHub, and Discord connectors, the public Knowledge API, MCP, generated SDK, and dynamic Sandbox plugins are planned for later phases.
-Gmail sending, GitHub code changes, payments, multiple owners, and multi-tenancy are outside the v0.1 scope.
+GitHub code changes, payments, multiple owners, and multi-tenancy are outside the v0.1 scope.
+Gmail sending is available only through an exact-content owner approval.
 
 ## Security boundaries
 

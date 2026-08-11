@@ -42,7 +42,6 @@ type Bindings = {
   AI?: WorkersAiBinding;
   WORKERS_AI_MODEL?: string;
   AI_GATEWAY_ID?: string;
-  GMAIL_DRAFT_ALLOWED_RECIPIENTS?: string;
 };
 
 type AssistantEnv = {
@@ -512,7 +511,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
 
   const requestGoogleWriteApproval = async (
     context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
-    capabilityId: "google.gmail.drafts.create" | "google.calendar.events.create",
+    capabilityId: "google.gmail.drafts.create" | "google.gmail.messages.send" |
+      "google.calendar.events.create",
     operationRequest: Record<string, JsonValue>,
     preview: Record<string, JsonValue>,
   ): Promise<Response> => {
@@ -542,7 +542,6 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
 
   const googleAgentTools = (
     connections: readonly ApiConnection[],
-    recipients: readonly string[],
   ): ModelToolDefinition[] => {
     const connectionIds = connections.map((connection) => connection.connectionId);
     const connectionProperty = {
@@ -605,14 +604,14 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         },
       },
     ];
-    if (recipients.length > 0) tools.push({
-      name: "google_gmail_create_draft",
-      description: "Request approval to create (not send) a Gmail draft to an allowed recipient.",
+    tools.push({
+      name: "google_gmail_send",
+      description: "Request approval to send a Gmail message. The message is sent only after owner approval.",
       parameters: {
         type: "object",
         properties: {
           connectionId: connectionProperty,
-          to: { type: "string", enum: recipients },
+          to: { type: "string", description: "Single recipient email address" },
           subject: { type: "string" },
           body: { type: "string" },
         },
@@ -678,23 +677,23 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       });
       return `Drive検索結果（モデルへ再送していません）:\n${JSON.stringify(value, null, 2)}`;
     }
-    if (call.name === "google_gmail_create_draft") {
+    if (call.name === "google_gmail_send") {
       const to = call.arguments["to"];
       const subject = call.arguments["subject"];
       const body = call.arguments["body"];
       if (typeof to !== "string" || typeof subject !== "string" || typeof body !== "string") {
-        return "Gmail下書きの内容が不正です。";
+        return "Gmail送信内容が不正です。";
       }
-      const approval = await requestGoogleWriteApproval(context, "google.gmail.drafts.create", {
+      const approval = await requestGoogleWriteApproval(context, "google.gmail.messages.send", {
         connectionId, to, subject, body,
       }, {
-        destination: to, operation: "Create Gmail draft", subject, bodyPreview: body.slice(0, 500),
+        destination: to, operation: "Send Gmail message", subject, body,
       });
       const value: unknown = await approval.json().catch(() => ({}));
       if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
       const approvalId = typeof value === "object" && value !== null
         ? (value as Record<string, unknown>)["approvalId"] : undefined;
-      return `Gmail下書きの作成は承認待ちです。承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
+      return `Gmail送信は承認待ちです。宛先・件名・本文を承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
     }
     if (call.name === "google_calendar_create_event") {
       const summary = call.arguments["summary"];
@@ -717,15 +716,15 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     return "要求されたToolは利用できません。";
   };
 
-  app.post("/v1/google/:connectionId/gmail/drafts", async (context) => {
+  app.post("/v1/google/:connectionId/gmail/messages/send", async (context) => {
     const value: unknown = await context.req.json().catch(() => null);
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return problem(context.req.raw, 400, "INVALID_REQUEST");
     }
     const body = value as Record<string, unknown>;
-    const recipients = new Set((context.env.GMAIL_DRAFT_ALLOWED_RECIPIENTS ?? "")
-      .split(",").map((recipient) => recipient.trim().toLowerCase()).filter(Boolean));
-    if (typeof body["to"] !== "string" || !recipients.has(body["to"].toLowerCase()) ||
+    if (typeof body["to"] !== "string" || body["to"].length > 320 ||
+      /[\r\n]/u.test(body["to"]) ||
+      !/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/u.test(body["to"]) ||
       typeof body["subject"] !== "string" || body["subject"].length > 998 ||
       typeof body["body"] !== "string" || body["body"].length > 65_536) {
       return problem(context.req.raw, 400, "INVALID_REQUEST");
@@ -734,9 +733,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       connectionId: context.req.param("connectionId"),
       to: body["to"], subject: body["subject"], body: body["body"],
     };
-    return requestGoogleWriteApproval(context, "google.gmail.drafts.create", operationRequest, {
-      destination: body["to"], operation: "Create Gmail draft",
-      subject: body["subject"], bodyPreview: body["body"].slice(0, 500),
+    return requestGoogleWriteApproval(context, "google.gmail.messages.send", operationRequest, {
+      destination: body["to"], operation: "Send Gmail message",
+      subject: body["subject"], body: body["body"],
     });
   });
 
@@ -982,10 +981,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       return problem(context.req.raw, 403, "MODEL_DESTINATION_DENIED");
     }
     const googleConnections = await activeGoogleConnectionsForAgent(context.env).catch(() => []);
-    const recipients = (context.env.GMAIL_DRAFT_ALLOWED_RECIPIENTS ?? "")
-      .split(",").map((recipient) => recipient.trim()).filter(Boolean);
     const tools = googleConnections.length > 0
-      ? googleAgentTools(googleConnections, recipients)
+      ? googleAgentTools(googleConnections)
       : [];
     const modelRequest: ModelRequest = {
       messages: [
@@ -1084,7 +1081,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       const outputs: string[] = [];
       let writeRequested = false;
       for (const call of generated.toolCalls.slice(0, 3)) {
-        const isWrite = call.name === "google_gmail_create_draft" ||
+        const isWrite = call.name === "google_gmail_send" ||
           call.name === "google_calendar_create_event";
         if (isWrite && writeRequested) {
           outputs.push("同じメッセージ内の追加書込は安全のため処理しませんでした。");

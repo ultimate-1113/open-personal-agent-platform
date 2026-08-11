@@ -20,6 +20,7 @@ import {
   listCalendarEvents,
   searchDrive,
   searchGmail,
+  sendGmailMessage,
 } from "@opap/google-connector";
 import { verifyExecutionLease } from "@opap/approval";
 import { importJWK, type JWK } from "jose";
@@ -32,7 +33,6 @@ type Bindings = {
   CREDENTIAL_KEK: string;
   CREDENTIAL_KEY_ID: string;
   EXECUTION_LEASE_PUBLIC_JWK: string;
-  GMAIL_DRAFT_ALLOWED_RECIPIENTS: string;
 };
 
 export const GOOGLE_PERSONAL_SCOPES = [
@@ -205,23 +205,20 @@ async function googleRead(request: Request, env: Bindings, operation: string): P
   return json({ code: "CAPABILITY_NOT_FOUND" }, 404);
 }
 
-const allowedRecipients = (env: Bindings): Set<string> =>
-  new Set(env.GMAIL_DRAFT_ALLOWED_RECIPIENTS.split(",")
-    .map((value) => value.trim().toLowerCase()).filter(Boolean));
-
 const writeInput = (
   capabilityId: string,
   value: unknown,
-  env: Bindings,
 ): Record<string, string> | undefined => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
   if (typeof input["connectionId"] !== "string") return undefined;
-  if (capabilityId === "google.gmail.drafts.create") {
+  if (capabilityId === "google.gmail.drafts.create" ||
+    capabilityId === "google.gmail.messages.send") {
     if (typeof input["to"] !== "string" || typeof input["subject"] !== "string" ||
       typeof input["body"] !== "string" || input["subject"].length > 998 ||
-      input["body"].length > 65_536 ||
-      !allowedRecipients(env).has(input["to"].toLowerCase())) return undefined;
+      input["body"].length > 65_536 || input["to"].length > 320 ||
+      /[\r\n]/u.test(input["to"]) ||
+      !/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/u.test(input["to"])) return undefined;
     return {
       connectionId: input["connectionId"], to: input["to"],
       subject: input["subject"], body: input["body"],
@@ -250,7 +247,7 @@ async function googleWrite(request: Request, env: Bindings): Promise<Response> {
   if (!body || typeof body["deploymentId"] !== "string" ||
     typeof body["principalId"] !== "string" || typeof body["capabilityId"] !== "string" ||
     typeof body["lease"] !== "string") return json({ code: "INVALID_REQUEST" }, 400);
-  const input = writeInput(body["capabilityId"], body["input"], env);
+  const input = writeInput(body["capabilityId"], body["input"]);
   if (!input) return json({ code: "INVALID_CAPABILITY_INPUT" }, 400);
   const keyValue: unknown = JSON.parse(env.EXECUTION_LEASE_PUBLIC_JWK);
   if (typeof keyValue !== "object" || keyValue === null || Array.isArray(keyValue)) {
@@ -281,11 +278,15 @@ async function googleWrite(request: Request, env: Bindings): Promise<Response> {
   const credential = await activeCredential(env, body["deploymentId"], input["connectionId"] ?? "");
   if (!credential) return json({ code: "GOOGLE_CONNECTION_NOT_FOUND" }, 404);
   try {
-    const value = body["capabilityId"] === "google.gmail.drafts.create"
-      ? await createGmailDraft({
+    const value = body["capabilityId"] === "google.gmail.messages.send"
+      ? await sendGmailMessage({
           to: input["to"] ?? "", subject: input["subject"] ?? "", body: input["body"] ?? "",
         }, { accessToken: credential.accessToken })
-      : await createCalendarEvent({
+      : body["capabilityId"] === "google.gmail.drafts.create"
+        ? await createGmailDraft({
+            to: input["to"] ?? "", subject: input["subject"] ?? "", body: input["body"] ?? "",
+          }, { accessToken: credential.accessToken })
+        : await createCalendarEvent({
           summary: input["summary"] ?? "", start: input["start"] ?? "", end: input["end"] ?? "",
           ...(input["description"] ? { description: input["description"] } : {}),
           ...(input["timeZone"] ? { timeZone: input["timeZone"] } : {}),

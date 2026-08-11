@@ -280,6 +280,7 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
   }
   if (input["capabilityId"] !== "google.gmail.drafts.create" &&
+    input["capabilityId"] !== "google.gmail.messages.send" &&
     input["capabilityId"] !== "google.calendar.events.create") {
     return Response.json({ code: "CAPABILITY_NOT_ALLOWED" }, { status: 403 });
   }
