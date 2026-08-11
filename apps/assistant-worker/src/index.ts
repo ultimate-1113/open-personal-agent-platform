@@ -625,12 +625,20 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   const executeGoogleAgentTool = async (
     context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
     call: ModelToolCall,
-    connectionIds: ReadonlySet<string>,
+    connections: readonly ApiConnection[],
   ): Promise<string> => {
-    const connectionId = call.arguments["connectionId"];
-    if (typeof connectionId !== "string" || !connectionIds.has(connectionId)) {
-      return "Google Toolを実行できませんでした: 接続が無効です。";
+    const requestedConnection = call.arguments["connectionId"];
+    const requested = typeof requestedConnection === "string"
+      ? requestedConnection.trim().toLocaleLowerCase()
+      : "";
+    const matchedConnection = connections.find((connection) =>
+      connection.connectionId.toLocaleLowerCase() === requested ||
+      connection.accountLabel?.trim().toLocaleLowerCase() === requested
+    ) ?? (connections.length === 1 ? connections[0] : undefined);
+    if (!matchedConnection) {
+      return "Google Toolを実行できませんでした: 使用するGoogleアカウントを指定してください。";
     }
+    const connectionId = matchedConnection.connectionId;
     const requestId = context.req.header("cf-ray") ?? crypto.randomUUID();
     const googleFetch = async (path: string, input: Record<string, JsonValue>) => {
       const response = await context.env.GOOGLE_GATEKEEPER.fetch(
@@ -1073,7 +1081,6 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     let assistantContent = generated.text;
     const billedModelOutput = generated.text || JSON.stringify(generated.toolCalls ?? []);
     if (generated.toolCalls?.length) {
-      const connectionIds = new Set(googleConnections.map((connection) => connection.connectionId));
       const outputs: string[] = [];
       let writeRequested = false;
       for (const call of generated.toolCalls.slice(0, 3)) {
@@ -1085,7 +1092,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         }
         if (isWrite) writeRequested = true;
         try {
-          outputs.push(await executeGoogleAgentTool(context, call, connectionIds));
+          outputs.push(await executeGoogleAgentTool(context, call, googleConnections));
         } catch {
           outputs.push(`Tool ${call.name} の実行に失敗しました。`);
         }
