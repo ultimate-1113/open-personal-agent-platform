@@ -192,6 +192,25 @@ describe("OAuth authorization flow", () => {
     })).rejects.toMatchObject({ status: 503 });
   });
 
+  it("reports a safe provider code when a token endpoint returns an error body with status 200", async () => {
+    const started = await createAuthorizationStart({
+      provider: OAUTH_PROVIDERS.github,
+      clientId: "github-client",
+      redirectUri: "https://agent.example.test/v1/connections/github/callback",
+      scopes: [], connectionKind: "personal", now,
+    });
+    await expect(exchangeAuthorizationCode({
+      provider: OAUTH_PROVIDERS.github,
+      clientId: "github-client", clientSecret: "fixture-secret", code: "bad-code",
+      transaction: started.transaction, now,
+      fetcher: vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+        error: "incorrect_client_credentials", error_description: "must not be exposed",
+      })),
+    })).rejects.toMatchObject({
+      name: "OAuthProviderError", providerCode: "incorrect_client_credentials",
+    });
+  });
+
   it("uses the provider revocation endpoint", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
     await revokeAccessToken({

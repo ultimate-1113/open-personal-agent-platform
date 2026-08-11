@@ -202,11 +202,13 @@ export class OAuthReconsentRequiredError extends Error {
 
 export class OAuthProviderError extends Error {
   readonly status: number;
+  readonly providerCode: string | undefined;
 
-  constructor(operation: "exchange" | "refresh" | "revoke", status: number) {
-    super(`OAuth ${operation} failed (${status})`);
+  constructor(operation: "exchange" | "refresh" | "revoke", status: number, providerCode?: string) {
+    super(`OAuth ${operation} failed (${status})${providerCode ? `: ${providerCode}` : ""}`);
     this.name = "OAuthProviderError";
     this.status = status;
+    this.providerCode = providerCode;
   }
 }
 
@@ -262,7 +264,12 @@ export async function exchangeAuthorizationCode(input: {
     body: form,
   });
   if (!response.ok) throw new OAuthProviderError("exchange", response.status);
-  const value = await response.json() as OAuthTokenResponse;
+  const value = await response.json() as OAuthTokenResponse & { error?: unknown };
+  if (typeof value.access_token !== "string" || typeof value.token_type !== "string") {
+    const providerCode = typeof value.error === "string" && /^[a-z0-9_-]{1,64}$/iu.test(value.error)
+      ? value.error : undefined;
+    throw new OAuthProviderError("exchange", response.status || 502, providerCode);
+  }
   return credentialFromTokenResponse(value, input.transaction.requestedScopes, input.now);
 }
 

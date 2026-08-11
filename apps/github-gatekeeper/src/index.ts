@@ -14,6 +14,7 @@ import {
 } from "@opap/github-connector";
 import {
   OAUTH_PROVIDERS,
+  OAuthProviderError,
   createAuthorizationStart,
   decryptCredential,
   encryptCredential,
@@ -173,12 +174,21 @@ const callback = async (request: Request, env: Bindings): Promise<Response> => {
      WHERE deployment_id = ? AND transaction_id = ? AND consumed_at IS NULL`,
   ).bind(now.toISOString(), body["deploymentId"], row.transaction_id).run();
   if (consumed.meta.changes !== 1) return json({ code: "OAUTH_TRANSACTION_REPLAY" }, 409);
-  const credential = await exchangeAuthorizationCode({
-    provider: OAUTH_PROVIDERS.github,
-    clientId: env.GITHUB_CLIENT_ID,
-    clientSecret: env.GITHUB_CLIENT_SECRET,
-    code: body["code"], transaction, now,
-  });
+  let credential: Awaited<ReturnType<typeof exchangeAuthorizationCode>>;
+  try {
+    credential = await exchangeAuthorizationCode({
+      provider: OAUTH_PROVIDERS.github,
+      clientId: env.GITHUB_CLIENT_ID,
+      clientSecret: env.GITHUB_CLIENT_SECRET,
+      code: body["code"], transaction, now,
+    });
+  } catch (error) {
+    if (error instanceof OAuthProviderError) {
+      return json({ code: "OAUTH_EXCHANGE_REJECTED",
+        ...(error.providerCode ? { providerCode: error.providerCode } : {}) }, 502);
+    }
+    throw error;
+  }
   const identityValue = await getAuthenticatedGitHubUser({ accessToken: credential.accessToken });
   if (typeof identityValue !== "object" || identityValue === null || Array.isArray(identityValue)) {
     return json({ code: "GITHUB_IDENTITY_INVALID" }, 502);
