@@ -223,6 +223,11 @@ describe("OAuth authorization flow", () => {
 });
 
 describe("OAuth credential envelope encryption", () => {
+  it("rejects a low-entropy credential encryption secret", async () => {
+    await expect(sealTransientSecret({ secret: "verifier", kek: "short", context: "tx" }))
+      .rejects.toThrow("32 characters");
+  });
+
   it("seals a short-lived transaction secret with context binding", async () => {
     const kek = createCredentialKek();
     const sealed = await sealTransientSecret({ secret: "verifier", kek, context: "tx:1" });

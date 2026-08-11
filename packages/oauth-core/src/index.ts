@@ -337,9 +337,10 @@ export type EncryptedCredentialEnvelope = {
   ciphertext: string;
 };
 
-const importKek = (key: string): Promise<CryptoKey> => {
-  const bytes = decodeBase64Url(key);
-  if (bytes.byteLength !== 32) throw new Error("Credential KEK must contain 32 bytes");
+const importKek = async (key: string): Promise<CryptoKey> => {
+  const normalized = key.trim();
+  if (normalized.length < 32) throw new Error("Credential KEK must contain at least 32 characters");
+  const bytes = await crypto.subtle.digest("SHA-256", encoder.encode(normalized));
   return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
 };
 
