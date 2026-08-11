@@ -140,10 +140,7 @@ export function App() {
           {
             method: "POST",
             headers: { "Idempotency-Key": crypto.randomUUID() },
-            body: JSON.stringify({
-              content,
-              connectorCloudTransferApproved: form.get("connectorCloudTransferApproved") === "on",
-            }),
+            body: JSON.stringify({ content }),
           },
         );
         if (!conversationId) {
@@ -224,11 +221,15 @@ export function App() {
   const decide = async (approvalId: string, decision: "approved" | "rejected") => {
     setBusy(true);
     try {
-      await request(`/v1/approvals/${encodeURIComponent(approvalId)}`, {
+      const result = await request(`/v1/approvals/${encodeURIComponent(approvalId)}`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ decision }),
       });
+      if (result["capabilityId"] === "model.connector-results.send") {
+        setTab("conversation");
+        return;
+      }
       await load();
     } catch (reason) {
       setError(localizedError(reason, t, "errors.approval"));
@@ -442,10 +443,6 @@ export function App() {
               if (!busy) event.currentTarget.form?.requestSubmit();
             }}
           />
-          <label className="check connector-consent">
-            <input name="connectorCloudTransferApproved" type="checkbox" disabled={busy} />
-            {t("conversation.connectorCloudConsent")}
-          </label>
           <small className="composer-hint">{t("conversation.keyboardHint")}</small>
           <button disabled={busy}>
             {conversationId ? t("conversation.send") : t("conversation.create")}

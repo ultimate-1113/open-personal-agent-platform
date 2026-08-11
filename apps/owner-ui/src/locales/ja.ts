@@ -39,7 +39,6 @@ export const ja = {
   "conversation.messageLabel": "メッセージ",
   "conversation.placeholder": "エージェントへ依頼する…",
   "conversation.keyboardHint": "Enterで送信・Shift+Enterで改行",
-  "conversation.connectorCloudConsent": "この依頼で取得したConnector結果をWorkers AIへ送信する（今回のみ）",
   "conversation.send": "送信",
   "conversation.create": "会話を作成",
   "tasks.placeholder": "タスク名",

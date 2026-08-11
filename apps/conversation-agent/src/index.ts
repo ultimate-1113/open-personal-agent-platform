@@ -56,6 +56,21 @@ type AppendExchangeInput = {
   providerId: string;
 };
 
+type PendingConnectorResultInput = {
+  principalId: string;
+  resultId: string;
+  question: string;
+  result: string;
+  display: string;
+};
+
+type AppendAssistantInput = {
+  principalId: string;
+  idempotencyKey: string;
+  content: string;
+  providerId: string;
+};
+
 const isInitializeInput = (value: unknown): value is InitializeInput => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const input = value as Record<string, unknown>;
@@ -116,6 +131,24 @@ const isAppendExchangeInput = (value: unknown): value is AppendExchangeInput => 
     String(input["assistantContent"]).length <= 65_536;
 };
 
+const isPendingConnectorResultInput = (value: unknown): value is PendingConnectorResultInput => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  return typeof input["principalId"] === "string" &&
+    typeof input["resultId"] === "string" && /^connector-result:[0-9a-f-]{36}$/u.test(input["resultId"]) &&
+    typeof input["question"] === "string" && input["question"].length <= 32_768 &&
+    typeof input["result"] === "string" && input["result"].length <= 65_536 &&
+    typeof input["display"] === "string" && input["display"].length <= 65_536;
+};
+
+const isAppendAssistantInput = (value: unknown): value is AppendAssistantInput => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  return typeof input["principalId"] === "string" && typeof input["idempotencyKey"] === "string" &&
+    typeof input["content"] === "string" && input["content"].length <= 65_536 &&
+    typeof input["providerId"] === "string";
+};
+
 export class ConversationAgent {
   readonly #sql: SqlStorage;
 
@@ -166,6 +199,15 @@ export class ConversationAgent {
         retry_count INTEGER NOT NULL DEFAULT 0,
         last_attempt_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS pending_connector_results (
+        result_id TEXT PRIMARY KEY,
+        principal_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        result TEXT NOT NULL,
+        display TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
     `);
     const taskColumns = [...this.#sql.exec<{ name: string }>("PRAGMA table_info(tasks)")];
     if (!taskColumns.some((column) => column.name === "description")) {
@@ -197,6 +239,28 @@ export class ConversationAgent {
       const value: unknown = await request.json().catch(() => null);
       return isAppendExchangeInput(value)
         ? this.#appendExchange(value)
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    if (request.method === "POST" && path === "/connector-results") {
+      const value: unknown = await request.json().catch(() => null);
+      return isPendingConnectorResultInput(value)
+        ? this.#storeConnectorResult(value)
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    if (request.method === "POST" && path === "/connector-results/consume") {
+      const value: unknown = await request.json().catch(() => null);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+      }
+      const input = value as Record<string, unknown>;
+      return typeof input["principalId"] === "string" && typeof input["resultId"] === "string"
+        ? this.#consumeConnectorResult(input["principalId"], input["resultId"])
+        : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    if (request.method === "POST" && path === "/messages/assistant") {
+      const value: unknown = await request.json().catch(() => null);
+      return isAppendAssistantInput(value)
+        ? this.#appendAssistant(value)
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
     if (request.method === "GET" && path === "/tasks") return this.#tasks();
@@ -410,6 +474,57 @@ export class ConversationAgent {
       principalId: input.principalId,
       providerId: input.providerId,
     }, now);
+    return Response.json(response, { status: 201 });
+  }
+
+  #storeConnectorResult(input: PendingConnectorResultInput): Response {
+    const now = new Date();
+    this.#sql.exec("DELETE FROM pending_connector_results WHERE expires_at <= ?", now.toISOString());
+    this.#sql.exec(
+      `INSERT OR REPLACE INTO pending_connector_results
+       (result_id, principal_id, question, result, display, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      input.resultId, input.principalId, input.question, input.result, input.display, now.toISOString(),
+      new Date(now.getTime() + 24 * 60 * 60_000).toISOString(),
+    );
+    return Response.json({ resultId: input.resultId }, { status: 201 });
+  }
+
+  #consumeConnectorResult(principalId: string, resultId: string): Response {
+    const row = firstRow(this.#sql.exec<{
+      question: string; result: string; display: string; expires_at: string;
+    }>(`SELECT question, result, display, expires_at FROM pending_connector_results
+        WHERE result_id = ? AND principal_id = ?`, resultId, principalId));
+    if (!row || Date.parse(row.expires_at) <= Date.now()) {
+      this.#sql.exec("DELETE FROM pending_connector_results WHERE result_id = ?", resultId);
+      return Response.json({ code: "CONNECTOR_RESULT_EXPIRED" }, { status: 410 });
+    }
+    this.#sql.exec("DELETE FROM pending_connector_results WHERE result_id = ?", resultId);
+    return Response.json({ question: row.question, result: row.result, display: row.display });
+  }
+
+  #appendAssistant(input: AppendAssistantInput): Response {
+    const key = `assistant:${input.idempotencyKey}`;
+    const replay = this.#replay(key);
+    if (replay) return Response.json(replay);
+    const now = new Date().toISOString();
+    const policy = informationPolicySchema.parse({
+      subjectPrincipalIds: [input.principalId], visibility: "owner", sensitivity: "sensitive",
+      trust: "external", allowedAudienceIds: [input.principalId],
+      allowedDestinationIds: [input.providerId], retention: { mode: "until-deleted" },
+    });
+    const messageId = `message:${crypto.randomUUID()}`;
+    this.#sql.exec(
+      `INSERT INTO messages
+       (message_id, role, content, information_policy_json, observation_ids_json, created_at)
+       VALUES (?, 'assistant', ?, ?, '[]', ?)`,
+      messageId, input.content, JSON.stringify(policy), now,
+    );
+    this.#sql.exec("UPDATE conversation SET updated_at = ?", now);
+    const response = { messageId, role: "assistant", content: input.content,
+      providerId: input.providerId, createdAt: now };
+    this.#recordWrite(key, response, { eventType: "conversation.message.created", outcome: "success",
+      principalId: input.principalId, providerId: input.providerId }, now);
     return Response.json(response, { status: 201 });
   }
 

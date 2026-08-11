@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatConnectorResult } from "../apps/assistant-worker/src/index.js";
+import { formatConnectorResult, inferCalendarRange } from "../apps/assistant-worker/src/index.js";
 
 describe("assistant connector output", () => {
   it("formats Calendar data as a readable list instead of exposing JSON", () => {
@@ -15,5 +15,12 @@ describe("assistant connector output", () => {
       { full_name: "ultimate-1113/open-personal-agent-platform", html_url: "https://github.com/example/repo" },
     ])}`)).toContain("- ultimate-1113/open-personal-agent-platform");
     expect(formatConnectorResult("GitHub result:\n[]")).toContain("該当する項目はありません");
+  });
+
+  it("limits a Japanese next-year Calendar request to exactly one year", () => {
+    expect(inferCalendarRange("今後1年の予定は？", new Date("2026-08-11T00:00:00.000Z"))).toEqual({
+      timeMin: "2026-08-11T00:00:00.000Z",
+      timeMax: "2027-08-11T00:00:00.000Z",
+    });
   });
 });

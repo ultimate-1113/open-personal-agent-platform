@@ -96,30 +96,6 @@ const isOwnerInput = (value: unknown): value is OwnerAuthenticationInput => {
   ) && (input["email"] === undefined || typeof input["email"] === "string");
 };
 
-async function recordInternalAudit(request: Request, env: Bindings): Promise<Response> {
-  const value: unknown = await request.json().catch(() => null);
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
-  }
-  const input = value as Record<string, unknown>;
-  if (typeof input["deploymentId"] !== "string" ||
-    typeof input["principalId"] !== "string" ||
-    input["eventType"] !== "model.connector-data-transfer.approved" ||
-    typeof input["requestId"] !== "string" ||
-    typeof input["metadata"] !== "object" || input["metadata"] === null ||
-    Array.isArray(input["metadata"])) {
-    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
-  }
-  const recorded = await audit(env, {
-    deploymentId: input["deploymentId"], principalId: input["principalId"],
-    eventType: input["eventType"], outcome: "success", requestId: input["requestId"],
-    metadata: input["metadata"] as Record<string, unknown>,
-  });
-  return recorded
-    ? Response.json({ recorded: true }, { status: 201 })
-    : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
-}
-
 async function authenticateOwner(
   request: Request,
   database: D1Database,
@@ -298,7 +274,8 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     typeof input["request"] !== "object" || input["request"] === null ||
     typeof input["taskId"] !== "string" ||
     (input["gatekeeperId"] !== "gatekeeper:google-personal" &&
-      input["gatekeeperId"] !== "gatekeeper:github-personal") ||
+      input["gatekeeperId"] !== "gatekeeper:github-personal" &&
+      input["gatekeeperId"] !== "gatekeeper:model-router") ||
     typeof input["requestId"] !== "string"
     || typeof input["idempotencyKey"] !== "string"
   ) {
@@ -308,11 +285,15 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     input["capabilityId"] !== "google.gmail.messages.send" &&
     input["capabilityId"] !== "google.calendar.events.create" &&
     input["capabilityId"] !== "github.issues.create" &&
-    input["capabilityId"] !== "github.issue-comments.create") {
+    input["capabilityId"] !== "github.issue-comments.create" &&
+    input["capabilityId"] !== "model.connector-results.send") {
     return Response.json({ code: "CAPABILITY_NOT_ALLOWED" }, { status: 403 });
   }
-  if ((String(input["capabilityId"]).startsWith("github.")) !==
-    (input["gatekeeperId"] === "gatekeeper:github-personal")) {
+  const expectedGatekeeper = String(input["capabilityId"]).startsWith("github.")
+    ? "gatekeeper:github-personal"
+    : input["capabilityId"] === "model.connector-results.send"
+      ? "gatekeeper:model-router" : "gatekeeper:google-personal";
+  if (input["gatekeeperId"] !== expectedGatekeeper) {
     return Response.json({ code: "GATEKEEPER_CAPABILITY_MISMATCH" }, { status: 403 });
   }
   const operationRequest = input["request"] as JsonValue;
@@ -379,7 +360,10 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
     current.status === input["decision"] &&
     current.decision_idempotency_key === input["idempotencyKey"]
   ) {
-    return Response.json(approvalJson(current));
+    const replay = approvalJson(current);
+    return Response.json(current.capability_id === "model.connector-results.send" && current.request_json
+      ? { ...replay, executionRequest: JSON.parse(current.request_json) as JsonValue }
+      : replay);
   }
   if (current.status !== "pending" || Date.parse(current.expires_at) <= Date.now()) {
     return Response.json({ code: "APPROVAL_NOT_PENDING" }, { status: 409 });
@@ -410,7 +394,11 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
     decided_at: now,
     decision_idempotency_key: String(input["idempotencyKey"]),
   });
-  if (input["decision"] !== "approved") return Response.json(decided);
+  if (input["decision"] !== "approved") {
+    return Response.json(current.capability_id === "model.connector-results.send" && current.request_json
+      ? { ...decided, executionRequest: JSON.parse(current.request_json) as JsonValue }
+      : decided);
+  }
   if (!current.request_json || !current.task_id || !current.gatekeeper_id) {
     return Response.json({ code: "APPROVAL_EXECUTION_DATA_MISSING" }, { status: 503 });
   }
@@ -660,9 +648,6 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/internal/v1/audit") {
       return listAudit(request, env);
-    }
-    if (request.method === "POST" && url.pathname === "/internal/v1/audit/events") {
-      return recordInternalAudit(request, env);
     }
     if (
       (request.method === "GET" || request.method === "PATCH") &&

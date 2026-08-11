@@ -37,7 +37,6 @@ export const en = {
   "conversation.messageLabel": "Message",
   "conversation.placeholder": "Ask the agent to do something…",
   "conversation.keyboardHint": "Enter to send · Shift+Enter for a new line",
-  "conversation.connectorCloudConsent": "Send connector results from this request to Workers AI (this request only)",
   "conversation.send": "Send",
   "conversation.create": "Create conversation",
   "tasks.placeholder": "Task title",
