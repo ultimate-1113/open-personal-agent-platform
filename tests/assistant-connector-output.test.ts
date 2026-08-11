@@ -8,6 +8,7 @@ import {
   isRepositoryIssueListRequest,
   normalConversationContext,
   repositoryMention,
+  resolveGitHubToolContext,
   selectConnectorToolNames,
 } from "../apps/assistant-worker/src/index.js";
 
@@ -61,6 +62,19 @@ describe("assistant connector output", () => {
       .toBe(false);
   });
 
+  it("fills a comment target from the current Issue number and recent repository context", () => {
+    expect(resolveGitHubToolContext({
+      name: "github_issue_comment_create",
+      arguments: { connectionId: "connection:github", repository: "repository", body: "test" },
+    }, "issue#1にテストコメント送って", [
+      { role: "user", content: "ultimate-1113/open-personal-agent-platformにissueある？" },
+    ])).toMatchObject({ arguments: {
+      repository: "ultimate-1113/open-personal-agent-platform",
+      issueNumber: 1,
+      body: "test",
+    } });
+  });
+
   it("limits a Japanese next-year Calendar request to exactly one year", () => {
     expect(inferCalendarRange("今後1年の予定は？", new Date("2026-08-11T00:00:00.000Z"))).toEqual({
       timeMin: "2026-08-11T00:00:00.000Z",
@@ -82,6 +96,7 @@ describe("assistant connector output", () => {
     ["明日15時にテスト予定を作成して", "google_calendar_create_event"],
     ["今後2年間の予定は？", "google_calendar_list_events"],
     ["対象RepositoryにテストIssueを作成して", "github_issue_create"],
+    ["issue#1にテストコメント送って", "github_issue_comment_create"],
     ["GitHubでアクセス可能なリポジトリは？", "github_repositories_list"],
   ])("routes %s only to %s", (prompt, expected) => {
     expect(selectConnectorToolNames(prompt)).toEqual([expected]);

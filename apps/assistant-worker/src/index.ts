@@ -319,6 +319,31 @@ export const isRepositoryIssueListRequest = (prompt: string): boolean =>
   /(?:ある|あります|存在|一覧|list|any)/iu.test(prompt) &&
   !/(?:作成|追加|登録|create|add|コメント|comment)/iu.test(prompt);
 
+export const resolveGitHubToolContext = (
+  call: ModelToolCall,
+  content: string,
+  history: readonly ConversationContextMessage[],
+): ModelToolCall => {
+  if (call.name !== "github_issue_create" && call.name !== "github_issue_comment_create") return call;
+  const recent = [content, ...[...history].reverse().map((message) => message.content)];
+  const repository = recent.map(repositoryMention).find((value) => value !== undefined);
+  const issueNumberMatch = recent.map((value) => value.match(/(?:issue\s*)?#\s*(\d+)/iu))
+    .find((value) => value?.[1]);
+  const currentRepository = call.arguments["repository"];
+  const currentIssueNumber = call.arguments["issueNumber"];
+  return {
+    ...call,
+    arguments: {
+      ...call.arguments,
+      ...(repository && (typeof currentRepository !== "string" || !currentRepository.includes("/"))
+        ? { repository } : {}),
+      ...(call.name === "github_issue_comment_create" && issueNumberMatch?.[1] &&
+        typeof currentIssueNumber !== "number"
+        ? { issueNumber: Number(issueNumberMatch[1]) } : {}),
+    },
+  };
+};
+
 const GOOGLE_TOOL_NAMES = new Set([
   "google_gmail_search",
   "google_calendar_list_events",
@@ -362,7 +387,7 @@ export const selectConnectorToolNames = (prompt: string): string[] => {
   if (/(?:google\s*drive|ドライブ|drive)/u.test(text)) return ["google_drive_search"];
   if (/(?:github|repository|リポジトリ|issue|pull request|プルリク|コード)/u.test(text)) {
     if (/(?:コメント|返信|comment|reply)/u.test(text)) {
-      return isCreate || /(?:投稿|書いて|post)/u.test(text)
+      return isCreate || /(?:投稿|書いて|送って|送る|send|post)/u.test(text)
         ? ["github_issue_comment_create"]
         : ["github_issue_comments_list"];
     }
@@ -1603,21 +1628,22 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       let writeRequested = false;
       let connectorToolFailed = false;
       for (const call of generated.toolCalls.slice(0, 3)) {
-        const isWrite = call.name === "google_gmail_send" ||
-          call.name === "google_calendar_create_event" ||
-          call.name === "github_issue_create" || call.name === "github_issue_comment_create";
+        const resolvedCall = resolveGitHubToolContext(call, content, conversationHistory);
+        const isWrite = resolvedCall.name === "google_gmail_send" ||
+          resolvedCall.name === "google_calendar_create_event" ||
+          resolvedCall.name === "github_issue_create" || resolvedCall.name === "github_issue_comment_create";
         if (isWrite && writeRequested) {
           outputs.push("同じメッセージ内の追加書込は安全のため処理しませんでした。");
           continue;
         }
         if (isWrite) writeRequested = true;
         try {
-          outputs.push(call.name.startsWith("github_")
-            ? await executeGitHubAgentTool(context, call, githubConnections, conversationId)
-            : await executeGoogleAgentTool(context, call, googleConnections, content, now, conversationId));
+          outputs.push(resolvedCall.name.startsWith("github_")
+            ? await executeGitHubAgentTool(context, resolvedCall, githubConnections, conversationId)
+            : await executeGoogleAgentTool(context, resolvedCall, googleConnections, content, now, conversationId));
         } catch {
           connectorToolFailed = true;
-          outputs.push(`Tool ${call.name} の実行に失敗しました。`);
+          outputs.push(`Tool ${resolvedCall.name} の実行に失敗しました。`);
         }
       }
       assistantContent = outputs.map(formatConnectorResult).join("\n\n");
