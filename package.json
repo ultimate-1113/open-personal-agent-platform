@@ -1,6 +1,6 @@
 {
   "name": "open-personal-agent-platform",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.28.1",
@@ -14,7 +14,10 @@
     "lint": "eslint .",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "typecheck": "pnpm -r --if-present typecheck"
+    "typecheck": "pnpm -r --if-present typecheck",
+    "secret:discord:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register-discord-staging-secrets.ps1",
+    "sync:discord:commands": "node --experimental-strip-types scripts/sync-discord-commands.ts",
+    "verify:execution-lease-keys": "node --experimental-strip-types scripts/verify-execution-lease-keys.ts .wrangler/staging"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.7",

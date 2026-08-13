@@ -1,6 +1,8 @@
 import { Hono, type MiddlewareHandler } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   cloudCostPolicySchema,
+  normalizeTimeZone,
   ownerModelSettingsSchema,
   type CloudCostPolicy,
   type OwnerModelSettings,
@@ -28,17 +30,25 @@ import {
   PRICE_CATALOG,
   type CostPolicyRepository,
 } from "@opap/cost-control";
+import {
+  discordInstallUrls,
+  type DiscordAssistantRequest,
+  type DiscordAssistantResponse,
+} from "@opap/discord-connector";
 
 type Bindings = {
   ENVIRONMENT: string;
   DEPLOYMENT_ID: string;
   OWNER_EMAIL: string;
+  OWNER_TIME_ZONE?: string;
   ACCESS_ISSUER: string;
   ACCESS_AUDIENCE: string;
   ACCESS_JWKS_URI: string;
   CONTROL: Fetcher;
   GOOGLE_GATEKEEPER: Fetcher;
   GITHUB_GATEKEEPER: Fetcher;
+  DISCORD_GATEKEEPER: Fetcher;
+  DISCORD_APPLICATION_ID?: string;
   CONVERSATIONS: DurableObjectNamespace;
   OWNER_QUOTA: DurableObjectNamespace;
   AI?: WorkersAiBinding;
@@ -359,6 +369,7 @@ export const conversationRepositoryContextAnswer = (
 
 const GOOGLE_TOOL_NAMES = new Set([
   "google_gmail_search",
+  "google_gmail_draft_create",
   "google_calendar_list_events",
   "google_drive_search",
   "google_calendar_create_event",
@@ -389,10 +400,13 @@ const CHANGEABLE_READ_TOOL_NAMES = new Set([
 export const selectConnectorToolNames = (prompt: string): string[] => {
   const text = prompt.normalize("NFKC").toLocaleLowerCase();
   const isCreate = /(?:作成|追加|登録|入れて|予定を入|create|add)/u.test(text);
-  if (/(?:gmail|メール|email)/u.test(text)) {
+  if (/(?:gmail|メール|email|[\w.+-]+@[\w.-]+\.[a-z]{2,})/u.test(text)) {
+    if (/(?:下書き|ドラフト|draft)/u.test(text) ||
+      (isCreate && !/(?:送信|送って|送る|メールして|send)/u.test(text))) {
+      return ["google_gmail_draft_create"];
+    }
     return /(?:送信|送って|送る|メールして|send)/u.test(text)
-      ? ["google_gmail_send"]
-      : ["google_gmail_search"];
+      ? ["google_gmail_send"] : ["google_gmail_search"];
   }
   if (/(?:calendar|カレンダー|予定|スケジュール)/u.test(text)) {
     return isCreate ? ["google_calendar_create_event"] : ["google_calendar_list_events"];
@@ -412,6 +426,19 @@ export const selectConnectorToolNames = (prompt: string): string[] => {
     return ["github_repositories_list"];
   }
   return [];
+};
+
+export const inferGmailWriteToolCall = (
+  prompt: string,
+  name: "google_gmail_draft_create" | "google_gmail_send",
+  connectionId: string,
+): ModelToolCall | undefined => {
+  const normalized = prompt.normalize("NFKC");
+  const to = normalized.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/u)?.[0];
+  const subject = normalized.match(/件名\s*(?:は|[:：])?\s*[「『"]([^」』"]+)[」』"]/u)?.[1];
+  const body = normalized.match(/本文\s*(?:は|[:：])?\s*[「『"]([^」』"]+)[」』"]/u)?.[1];
+  if (!to || !subject || !body) return undefined;
+  return { name, arguments: { connectionId, to, subject, body } };
 };
 
 const requestedItemCount = (prompt: string, fallback: number, maximum: number): number => {
@@ -675,7 +702,6 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     context.set("ownerPrincipalId", authorization.principalId);
     return next();
   });
-
   const authorizeConversation: MiddlewareHandler<AssistantEnv> = async (context, next) => {
     const authorization = await dependencies.authorizeOwner(context.req.raw, context.env);
     if (authorization.outcome === "unavailable") {
@@ -687,6 +713,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     context.set("ownerPrincipalId", authorization.principalId);
     return next();
   };
+  app.use("/v1/settings/preferences", authorizeConversation);
   app.use("/v1/conversations", authorizeConversation);
   app.use("/v1/conversations/*", authorizeConversation);
   for (const route of ["/v1/tasks", "/v1/memories", "/v1/approvals", "/v1/audit"]) {
@@ -716,10 +743,105 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         fetchConnections("google", context.env.GOOGLE_GATEKEEPER),
         fetchConnections("github", context.env.GITHUB_GATEKEEPER),
       ]);
-      return context.json({ connections: [...google, ...github] });
+      const linkUrl = new URL("https://control.internal/internal/v1/discord/link");
+      linkUrl.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+      linkUrl.searchParams.set("principalId", context.get("ownerPrincipalId"));
+      const [linkResponse, destinationsResponse] = await Promise.all([
+        context.env.CONTROL.fetch(linkUrl),
+        context.env.DISCORD_GATEKEEPER.fetch(
+          `https://discord-gatekeeper.internal/internal/v1/destinations?deploymentId=${encodeURIComponent(context.env.DEPLOYMENT_ID)}`,
+        ),
+      ]);
+      const linkValue: unknown = await linkResponse.json().catch(() => ({}));
+      const destinationValue: unknown = await destinationsResponse.json().catch(() => ({}));
+      const link = linkResponse.ok && typeof linkValue === "object" && linkValue !== null
+        ? (linkValue as Record<string, unknown>)["link"] : undefined;
+      const destinations = destinationsResponse.ok && typeof destinationValue === "object" && destinationValue !== null
+        && Array.isArray((destinationValue as Record<string, unknown>)["destinations"])
+        ? (destinationValue as Record<string, unknown>)["destinations"] : [];
+      return context.json({ connections: [...google, ...github], discord: { link, destinations,
+        ...(context.env.DISCORD_APPLICATION_ID
+          ? { installUrls: discordInstallUrls(context.env.DISCORD_APPLICATION_ID) } : {}) } });
     } catch {
       return problem(context.req.raw, 503, "CONNECTIONS_UNAVAILABLE");
     }
+  });
+
+  app.post("/v1/connections/discord/link-code", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    const conversationId = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["conversationId"] : undefined;
+    if (typeof conversationId !== "string" || !/^conversation:[a-f0-9]{64}$/u.test(conversationId)) {
+      return problem(context.req.raw, 400, "DISCORD_CONVERSATION_REQUIRED");
+    }
+    const bytes = crypto.getRandomValues(new Uint8Array(20));
+    const code = Array.from(bytes).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const expiresAt = new Date((dependencies.now?.() ?? new Date()).getTime() + 10 * 60_000).toISOString();
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/discord/link-codes", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID, principalId: context.get("ownerPrincipalId"),
+          conversationId, codeDigest: await sha256Hex(code), expiresAt,
+        }),
+      },
+    );
+    return response.ok ? context.json({ code, expiresAt }, 201) : new Response(response.body, response);
+  });
+
+  app.post("/v1/connections/discord/commands/sync", async (context) => {
+    const response = await context.env.DISCORD_GATEKEEPER.fetch(
+      "https://discord-gatekeeper.internal/internal/v1/commands/sync", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID }),
+      },
+    );
+    return new Response(response.body, response);
+  });
+
+  app.delete("/v1/connections/discord", async (context) => {
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/discord/link", {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID, principalId: context.get("ownerPrincipalId"),
+        }),
+      },
+    );
+    return new Response(response.body, response);
+  });
+
+  app.patch("/v1/connections/discord/destinations/:destinationId", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const input = value as Record<string, unknown>;
+    if (typeof input["guildId"] !== "string" || typeof input["channelId"] !== "string" ||
+      (input["displayPolicy"] !== "metadata-only" && input["displayPolicy"] !== "full-preview") ||
+      (input["commandPolicy"] !== "approved-only" && input["commandPolicy"] !== "owner-any" &&
+        input["commandPolicy"] !== "dm-only")) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    return requestExternalWriteApproval(context, "discord.notification-policy.update", {
+      guildId: input["guildId"], channelId: input["channelId"],
+      displayPolicy: input["displayPolicy"], commandPolicy: input["commandPolicy"],
+    }, {
+      destination: context.req.param("destinationId"), operation: "Update Discord notification policy",
+      displayPolicy: input["displayPolicy"], commandPolicy: input["commandPolicy"],
+      warning: input["displayPolicy"] === "full-preview"
+        ? "Normal or sensitive preview data may be visible to channel participants." : "Metadata only",
+    }, "gatekeeper:discord");
+  });
+
+  app.delete("/v1/connections/discord/destinations/:destinationId", async (context) => {
+    const response = await context.env.DISCORD_GATEKEEPER.fetch(
+      "https://discord-gatekeeper.internal/internal/v1/destinations", {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID, principalId: context.get("ownerPrincipalId"),
+          destinationId: context.req.param("destinationId"),
+        }),
+      },
+    );
+    return new Response(response.body, response);
   });
 
   app.post("/v1/connections/google/start", async (context) => {
@@ -881,7 +1003,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
     capabilityId: "google.gmail.drafts.create" | "google.gmail.messages.send" |
       "google.calendar.events.create" | "github.issues.create" |
-      "github.issue-comments.create" | "model.connector-results.send",
+      "github.issue-comments.create" | "model.connector-results.send" |
+      "discord.notification-destinations.configure" | "discord.notification-policy.update" |
+      "discord.notifications.deliver",
     operationRequest: Record<string, JsonValue>,
     preview: Record<string, JsonValue>,
     gatekeeperId = "gatekeeper:google-personal",
@@ -907,6 +1031,25 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         }),
       },
     );
+    if (response.ok) {
+      const approval: unknown = await response.clone().json().catch(() => undefined);
+      if (typeof approval === "object" && approval !== null && !Array.isArray(approval) &&
+        typeof (approval as Record<string, unknown>)["approvalId"] === "string") {
+        const approvalId = (approval as Record<string, unknown>)["approvalId"] as string;
+        const operationLabel = typeof preview["operation"] === "string"
+          ? preview["operation"] : capabilityId;
+        await context.env.DISCORD_GATEKEEPER.fetch(
+          "https://discord-gatekeeper.internal/internal/v1/notifications/deliver", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+              deploymentId: context.env.DEPLOYMENT_ID, capabilityId,
+              content: `${operationLabel}\n${JSON.stringify(preview).slice(0, 1_500)}`,
+              sensitivity: "normal", destinationAllowed: false,
+              reviewCustomId: `discord:approval:review:${approvalId}`,
+            }),
+          },
+        ).catch(() => undefined);
+      }
+    }
     return new Response(response.body, response);
   };
 
@@ -931,6 +1074,20 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
             query: { type: "string", description: "Gmail search query" },
           },
           required: ["connectionId", "query"],
+        },
+      },
+      {
+        name: "google_gmail_draft_create",
+        description: "Request approval to create a Gmail draft. This never sends the message.",
+        parameters: {
+          type: "object",
+          properties: {
+            connectionId: connectionProperty,
+            to: { type: "string", description: "Single recipient email address" },
+            subject: { type: "string" },
+            body: { type: "string" },
+          },
+          required: ["connectionId", "to", "subject", "body"],
         },
       },
       {
@@ -1066,24 +1223,28 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       });
       return `Drive検索結果（モデルへ再送していません）:\n${JSON.stringify(value, null, 2)}`;
     }
-    if (call.name === "google_gmail_send") {
+    if (call.name === "google_gmail_draft_create" || call.name === "google_gmail_send") {
       const to = call.arguments["to"];
       const subject = call.arguments["subject"];
       const body = call.arguments["body"];
       if (typeof to !== "string" || typeof subject !== "string" || typeof body !== "string") {
         return "メールを送信するには、宛先、件名、本文を指定してください。";
       }
-      const approval = await requestExternalWriteApproval(context, "google.gmail.messages.send", {
+      const createsDraft = call.name === "google_gmail_draft_create";
+      const approval = await requestExternalWriteApproval(context,
+        createsDraft ? "google.gmail.drafts.create" : "google.gmail.messages.send", {
         connectionId, to, subject, body,
       }, {
-        destination: to, operation: "Send Gmail message", subject, body,
+        destination: to,
+        operation: createsDraft ? "Create Gmail draft" : "Send Gmail message",
+        subject, body,
         ...(conversationId ? { conversationId } : {}),
       });
       const value: unknown = await approval.json().catch(() => ({}));
       if (!approval.ok) throw new Error(`APPROVAL_REQUEST_FAILED_${approval.status}`);
       const approvalId = typeof value === "object" && value !== null
         ? (value as Record<string, unknown>)["approvalId"] : undefined;
-      return `Gmail送信は承認待ちです。宛先・件名・本文を承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
+      return `${createsDraft ? "Gmail下書きの作成" : "Gmail送信"}は承認待ちです。宛先・件名・本文を承認画面で確認してください。${typeof approvalId === "string" ? ` (${approvalId})` : ""}`;
     }
     if (call.name === "google_calendar_create_event") {
       const summary = call.arguments["summary"];
@@ -1334,6 +1495,35 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     }
   });
 
+  app.get("/v1/settings/preferences", async (context) => {
+    const url = new URL("https://control.internal/internal/v1/settings/preferences");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const response = await context.env.CONTROL.fetch(url);
+    if (response.status === 404) return context.json({ timeZone: context.env.OWNER_TIME_ZONE || "UTC" });
+    return new Response(response.body, response);
+  });
+
+  app.patch("/v1/settings/preferences", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const value: unknown = await context.req.json().catch(() => null);
+    const requestedTimeZone = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["timeZone"] : undefined;
+    const timeZone = normalizeTimeZone(requestedTimeZone);
+    if (!timeZone) {
+      return problem(context.req.raw, 400, "INVALID_TIME_ZONE");
+    }
+    const url = new URL("https://control.internal/internal/v1/settings/preferences");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const response = await context.env.CONTROL.fetch(url, { method: "PATCH",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ timeZone,
+        principalId: context.get("ownerPrincipalId"), idempotencyKey,
+        requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
+      }),
+    });
+    return new Response(response.body, response);
+  });
+
   app.get("/v1/usage", async (context) => {
     const period = context.req.query("period");
     if (period !== "current-billing-cycle") {
@@ -1528,7 +1718,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       : deterministicToolName?.startsWith("github_")
         ? (githubConnections.length === 1 ? githubConnections[0] : undefined)
         : undefined;
-    const deterministicToolCall: ModelToolCall | undefined = deterministicToolName && deterministicConnection
+    const deterministicReadToolCall: ModelToolCall | undefined = deterministicToolName && deterministicConnection
       ? {
           name: deterministicToolName,
           arguments: {
@@ -1539,6 +1729,11 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           },
         }
       : undefined;
+    const deterministicGmailWriteCall = googleConnections.length === 1 &&
+      (intendedToolNames[0] === "google_gmail_draft_create" || intendedToolNames[0] === "google_gmail_send")
+      ? inferGmailWriteToolCall(intentPrompt, intendedToolNames[0], googleConnections[0]!.connectionId)
+      : undefined;
+    const deterministicToolCall = deterministicGmailWriteCall ?? deterministicReadToolCall;
     const now = dependencies.now?.() ?? new Date();
     const modelRequest: ModelRequest = {
       messages: [
@@ -1644,9 +1839,16 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       const outputs: string[] = [];
       let writeRequested = false;
       let connectorToolFailed = false;
+      const allowedToolNames = new Set(tools.map((tool) => tool.name));
       for (const call of generated.toolCalls.slice(0, 3)) {
+        if (!allowedToolNames.has(call.name) && generated.providerId !== "provider:intent-router") {
+          connectorToolFailed = true;
+          outputs.push(`Tool ${call.name} was not allowed for this request.`);
+          continue;
+        }
         const resolvedCall = resolveGitHubToolContext(call, content, conversationHistory);
-        const isWrite = resolvedCall.name === "google_gmail_send" ||
+        const isWrite = resolvedCall.name === "google_gmail_draft_create" ||
+          resolvedCall.name === "google_gmail_send" ||
           resolvedCall.name === "google_calendar_create_event" ||
           resolvedCall.name === "github_issue_create" || resolvedCall.name === "github_issue_comment_create";
         if (isWrite && writeRequested) {
@@ -1762,6 +1964,29 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     }
     if (!await settleOwnerOperation(reservation, context.env.DEPLOYMENT_ID)) {
       return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+    }
+    if (!context.req.header("x-opap-message-source")) {
+      const linkUrl = new URL("https://control.internal/internal/v1/discord/link");
+      linkUrl.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+      linkUrl.searchParams.set("principalId", principalId);
+      const linkResponse = await context.env.CONTROL.fetch(linkUrl).catch(() => undefined);
+      const linkValue = linkResponse ? await responseObject(linkResponse) : {};
+      const link = typeof linkValue["link"] === "object" && linkValue["link"] !== null
+        ? linkValue["link"] as Record<string, unknown> : {};
+      if (typeof link["discordUserId"] === "string") {
+        const webRequest = content.length > 500 ? `${content.slice(0, 497)}...` : content;
+        const available = Math.max(0, 1_900 - webRequest.length);
+        const answer = assistantContent.length > available
+          ? `${assistantContent.slice(0, Math.max(0, available - 3))}...` : assistantContent;
+        await context.env.DISCORD_GATEKEEPER.fetch(
+          "https://discord-gatekeeper.internal/internal/v1/notifications/reply-dm", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+              discordUserId: link["discordUserId"],
+              content: `Web\n${webRequest}\n\nAssistant\n${answer}` }),
+          },
+        ).catch(() => undefined);
+      }
     }
     return new Response(response.body, response);
   });
@@ -1880,11 +2105,13 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     }
     const body = value as Record<string, unknown>;
     if (typeof body["conversationId"] !== "string" ||
-      typeof body["title"] !== "string" || body["title"].length === 0 ||
-      body["title"].length > 500 || typeof body["description"] !== "string" ||
-      body["description"].length === 0 || body["description"].length > 32_768 ||
-      (body["status"] !== "pending" && body["status"] !== "in-progress" &&
-        body["status"] !== "completed")) {
+      (body["title"] !== undefined && (typeof body["title"] !== "string" ||
+        body["title"].length === 0 || body["title"].length > 500)) ||
+      (body["description"] !== undefined && (typeof body["description"] !== "string" ||
+        body["description"].length === 0 || body["description"].length > 32_768)) ||
+      (body["status"] !== undefined && body["status"] !== "pending" &&
+        body["status"] !== "in-progress" && body["status"] !== "completed") ||
+      !["title", "description", "status", "schedule", "enabled"].some((key) => body[key] !== undefined)) {
       return problem(context.req.raw, 400, "INVALID_REQUEST");
     }
     const taskId = context.req.param("taskId");
@@ -1894,7 +2121,11 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     return mutateConversationResource(context, "task-update", `/tasks/${encodeURIComponent(taskId)}`,
       "PATCH", {
         conversationId: body["conversationId"], taskId,
-        title: body["title"], description: body["description"], status: body["status"],
+        ...(typeof body["title"] === "string" ? { title: body["title"] } : {}),
+        ...(typeof body["description"] === "string" ? { description: body["description"] } : {}),
+        ...(typeof body["status"] === "string" ? { status: body["status"] } : {}),
+        ...(body["schedule"] !== undefined ? { schedule: body["schedule"] as JsonValue } : {}),
+        ...(typeof body["enabled"] === "boolean" ? { enabled: body["enabled"] } : {}),
       });
   });
 
@@ -2223,24 +2454,32 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         : problem(context.req.raw, 503, "CONVERSATION_UNAVAILABLE");
     }
     const githubExecution = approved["capabilityId"].startsWith("github.");
-    const executionGatekeeper = githubExecution
-      ? context.env.GITHUB_GATEKEEPER : context.env.GOOGLE_GATEKEEPER;
-    const execution = await executionGatekeeper.fetch(
-      `https://${githubExecution ? "github" : "google"}-gatekeeper.internal/internal/v1/${githubExecution ? "github" : "google"}/execute`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          deploymentId: context.env.DEPLOYMENT_ID,
-          principalId: context.get("ownerPrincipalId"),
-          capabilityId: approved["capabilityId"],
-          lease: approved["executionLease"],
-          input: approved["executionRequest"],
-          requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
-          agentId: "agent:assistant",
-        }),
-      },
-    );
+    const discordExecution = approved["capabilityId"].startsWith("discord.");
+    const executionGatekeeper = discordExecution ? context.env.DISCORD_GATEKEEPER
+      : githubExecution ? context.env.GITHUB_GATEKEEPER : context.env.GOOGLE_GATEKEEPER;
+    const gatekeeperName = discordExecution ? "discord" : githubExecution ? "github" : "google";
+    let execution: Response;
+    try {
+      execution = await executionGatekeeper.fetch(
+        `https://${gatekeeperName}-gatekeeper.internal/internal/v1/${discordExecution ? "execute" : `${gatekeeperName}/execute`}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deploymentId: context.env.DEPLOYMENT_ID,
+            principalId: context.get("ownerPrincipalId"),
+            capabilityId: approved["capabilityId"],
+            lease: approved["executionLease"],
+            input: approved["executionRequest"],
+            requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
+            agentId: "agent:assistant",
+          }),
+        },
+      );
+    } catch {
+      await recordExecutionOutcome("unknown", "GATEKEEPER_UNAVAILABLE");
+      return problem(context.req.raw, 409, "GATEKEEPER_UNAVAILABLE");
+    }
     const executionResult: unknown = await execution.json().catch(() => ({}));
     const executionRecord = typeof executionResult === "object" && executionResult !== null &&
       !Array.isArray(executionResult) ? executionResult as Record<string, unknown> : {};
@@ -2298,6 +2537,26 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
           status: execution.status,
           headers: { "Content-Type": "application/problem+json" },
         });
+  });
+
+  app.post("/v1/approvals/:approvalId/reconcile", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const value: unknown = await context.req.json().catch(() => null);
+    const executionStatus = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["executionStatus"] : undefined;
+    if (executionStatus !== "succeeded" && executionStatus !== "failed") {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/approvals/execution/reconcile", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"),
+          approvalId: context.req.param("approvalId"), executionStatus,
+          idempotencyKey, requestId: context.req.header("cf-ray") ?? crypto.randomUUID() }),
+      });
+    return new Response(response.body, response);
   });
 
   app.get("/v1/audit", async (context) => {
@@ -2384,6 +2643,453 @@ const authorizeConfiguredOwner = async (
       : { outcome: "unavailable" };
   }
 };
+
+const discordInternalApp = createAssistantApp({
+  authorizeOwner: (request) => {
+    const principalId = request.headers.get("x-opap-owner-principal");
+    return Promise.resolve(principalId
+      ? { outcome: "authorized" as const, principalId }
+      : { outcome: "denied" as const });
+  },
+});
+
+type ScheduledTaskRequest = {
+  conversationId: string;
+  principalId: string;
+  taskId: string;
+  title: string;
+  description: string;
+  scheduledFor: string;
+};
+
+export class ScheduledTaskEntrypoint extends WorkerEntrypoint<Bindings> {
+  async runScheduledTask(input: ScheduledTaskRequest): Promise<{ ok: boolean; errorCode?: string }> {
+    if (!/^conversation:[a-f0-9]{64}$/u.test(input.conversationId) ||
+      !/^task:[0-9a-f-]{36}$/u.test(input.taskId) || !input.principalId ||
+      !input.description || !Number.isFinite(Date.parse(input.scheduledFor))) {
+      return { ok: false, errorCode: "INVALID_SCHEDULED_TASK" };
+    }
+    const response = await discordInternalApp.fetch(new Request(
+      `https://assistant.internal/v1/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": `scheduled:${input.taskId}:${input.scheduledFor}`,
+          "x-opap-owner-principal": input.principalId,
+          "x-opap-message-source": "scheduled-task",
+        },
+        body: JSON.stringify({ content: `Scheduled task: ${input.title}\n\n${input.description}` }),
+      },
+    ), this.env, this.ctx);
+    if (response.ok) {
+      const value = await responseObject(response);
+      const assistant = typeof value["assistant"] === "object" && value["assistant"] !== null
+        ? value["assistant"] as Record<string, unknown> : {};
+      const content = displayValue(assistant["content"]);
+      if (content) {
+        const linkUrl = new URL("https://control.internal/internal/v1/discord/link");
+        linkUrl.searchParams.set("deploymentId", this.env.DEPLOYMENT_ID);
+        linkUrl.searchParams.set("principalId", input.principalId);
+        const linkResponse = await this.env.CONTROL.fetch(linkUrl).catch(() => undefined);
+        const link = linkResponse ? await responseObject(linkResponse) : {};
+        const discordLink = typeof link["link"] === "object" && link["link"] !== null
+          ? link["link"] as Record<string, unknown> : {};
+        const discordUserId = discordLink["discordUserId"];
+        if (typeof discordUserId === "string") {
+          await this.env.DISCORD_GATEKEEPER.fetch(
+            "https://discord-gatekeeper.internal/internal/v1/notifications/reply-dm", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ deploymentId: this.env.DEPLOYMENT_ID, discordUserId,
+                content: content.slice(0, 2_000) }),
+            },
+          ).catch(() => undefined);
+        }
+      }
+      return { ok: true };
+    }
+    const value = await responseObject(response);
+    return { ok: false, errorCode: displayValue(value["code"] ?? value["title"]) ||
+      `TASK_RUNNER_HTTP_${response.status}` };
+  }
+}
+
+type DiscordLink = {
+  ownerPrincipalId: string;
+  discordUserId: string;
+  displayName?: string | null;
+  conversationId: string;
+};
+
+const responseObject = async (response: Response): Promise<Record<string, unknown>> => {
+  const value: unknown = await response.json().catch(() => ({}));
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+};
+
+const displayValue = (value: unknown): string =>
+  typeof value === "string" || typeof value === "number" ? String(value) : "";
+
+export const requiresApprovedDiscordGuild = (commandName: string): boolean =>
+  commandName !== "notify-here";
+
+const discordLocalDateParts = (instant: Date, timeZone: string) => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(instant).filter((part) => part.type !== "literal")
+    .map((part) => [part.type, Number(part.value)]));
+  return { year: parts["year"] ?? 0, month: parts["month"] ?? 0, day: parts["day"] ?? 0,
+    hour: parts["hour"] ?? 0, minute: parts["minute"] ?? 0 };
+};
+
+const discordLocalInstant = (date: string, time: string, timeZone: string): Date | undefined => {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(time)) return undefined;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(0));
+  } catch {
+    return undefined;
+  }
+  const [year = 0, month = 0, day = 0] = date.split("-").map(Number);
+  const [hour = 0, minute = 0] = time.split(":").map(Number);
+  const desired = Date.UTC(year, month - 1, day, hour, minute);
+  let candidate = desired;
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    const actual = discordLocalDateParts(new Date(candidate), timeZone);
+    candidate -= Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute) - desired;
+  }
+  const actual = discordLocalDateParts(new Date(candidate), timeZone);
+  return actual.year === year && actual.month === month && actual.day === day &&
+    actual.hour === hour && actual.minute === minute ? new Date(candidate) : undefined;
+};
+
+const discordNextOnceAt = (options: Record<string, string | number | boolean>, timeZone: string): string => {
+  const now = new Date();
+  const time = displayValue(options["time"]);
+  const suppliedDate = displayValue(options["date"]);
+  if (suppliedDate) return discordLocalInstant(suppliedDate, time, timeZone)?.toISOString() ?? "";
+  const local = discordLocalDateParts(now, timeZone);
+  for (const offset of [0, 1]) {
+    const date = new Date(Date.UTC(local.year, local.month - 1, local.day + offset));
+    const dateText = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    const candidate = discordLocalInstant(dateText, time, timeZone);
+    if (candidate && candidate.getTime() > now.getTime()) return candidate.toISOString();
+  }
+  return "";
+};
+
+const discordTaskSchedule = (options: Record<string, string | number | boolean>, timeZone: string) => {
+  const repeat = options["frequency"] ?? options["repeat"];
+  if (repeat === undefined) return undefined;
+  if (repeat === "once") return { kind: "once", at: discordNextOnceAt(options, timeZone) } as const;
+  const time = displayValue(options["time"]);
+  if (repeat === "daily") return { kind: "daily", time, timeZone } as const;
+  if (repeat === "weekly") {
+    const names = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    return { kind: "weekly" as const, time, timeZone,
+      weekdays: names.flatMap((name, day) => options[name] === true ? [day] : []),
+    };
+  }
+  if (repeat === "monthly") return {
+    kind: "monthly" as const, time, timeZone, dayOfMonth: Number(options["day-of-month"]),
+  };
+  return { kind: "invalid" } as const;
+};
+
+export class DiscordEntrypoint extends WorkerEntrypoint<Bindings> {
+  private async resolve(discordUserId: string): Promise<DiscordLink | undefined> {
+    const url = new URL("https://control.internal/internal/v1/discord/resolve");
+    url.searchParams.set("deploymentId", this.env.DEPLOYMENT_ID);
+    url.searchParams.set("discordUserId", discordUserId);
+    const response = await this.env.CONTROL.fetch(url);
+    const value = await responseObject(response);
+    return response.ok && typeof value["link"] === "object" && value["link"] !== null
+      ? value["link"] as DiscordLink : undefined;
+  }
+
+  private async internal(link: DiscordLink, path: string, init?: RequestInit): Promise<Response> {
+    const headers = new Headers(init?.headers);
+    headers.set("Content-Type", "application/json");
+    headers.set("x-opap-owner-principal", link.ownerPrincipalId);
+    return discordInternalApp.fetch(new Request(`https://assistant.internal${path}`, {
+      ...init, headers,
+    }), this.env, this.ctx);
+  }
+
+  private async ownerTimeZone(): Promise<string> {
+    const url = new URL("https://control.internal/internal/v1/settings/preferences");
+    url.searchParams.set("deploymentId", this.env.DEPLOYMENT_ID);
+    const response = await this.env.CONTROL.fetch(url);
+    const value = await responseObject(response);
+    return response.ok && typeof value["timeZone"] === "string"
+      ? value["timeZone"] : this.env.OWNER_TIME_ZONE || "UTC";
+  }
+
+  private async guildAllowed(link: DiscordLink, guildId?: string, channelId?: string): Promise<boolean> {
+    if (!guildId) return true;
+    const response = await this.env.DISCORD_GATEKEEPER.fetch(
+      `https://discord-gatekeeper.internal/internal/v1/destinations?deploymentId=${encodeURIComponent(this.env.DEPLOYMENT_ID)}`,
+    );
+    const value = await responseObject(response);
+    const destinations = Array.isArray(value["destinations"])
+      ? value["destinations"] as Record<string, unknown>[] : [];
+    return destinations.some((destination) => destination["guildId"] === guildId &&
+      destination["commandPolicy"] !== "dm-only" &&
+      (destination["commandPolicy"] === "owner-any" || destination["channelId"] === channelId));
+  }
+
+  private async link(input: DiscordAssistantRequest): Promise<DiscordAssistantResponse> {
+    if (input.guildId) return { content: "Use /link in a direct message with the bot.", ephemeral: true };
+    const code = input.options["code"];
+    if (typeof code !== "string") return { content: "A link code is required.", ephemeral: true };
+    const response = await this.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/discord/link-codes/consume", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: this.env.DEPLOYMENT_ID, codeDigest: await sha256Hex(code),
+          discordUserId: input.discordUserId, displayName: input.displayName,
+        }),
+      },
+    );
+    const value = await responseObject(response);
+    if (!response.ok) return { content: displayValue(value["code"]) || "The link code is invalid or expired.", ephemeral: true };
+    const principalId = displayValue(value["ownerPrincipalId"]);
+    const destination = await this.env.DISCORD_GATEKEEPER.fetch(
+      "https://discord-gatekeeper.internal/internal/v1/destinations/dm", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: this.env.DEPLOYMENT_ID, principalId, discordUserId: input.discordUserId,
+        }),
+      },
+    );
+    return destination.ok
+      ? { content: "Discord is linked to the owner workspace.", ephemeral: true }
+      : { content: "The owner link was saved, but DM notifications could not be configured.", ephemeral: true };
+  }
+
+  private async approvalComponent(link: DiscordLink, componentId: string): Promise<DiscordAssistantResponse> {
+    if (componentId === "discord:unlink:confirm") {
+      const response = await this.env.CONTROL.fetch("https://control.internal/internal/v1/discord/link", {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: this.env.DEPLOYMENT_ID, principalId: link.ownerPrincipalId,
+        }),
+      });
+      return { content: response.ok ? "Discord was disconnected." : "Discord could not be disconnected.", ephemeral: true };
+    }
+    const notifyOff = /^discord:notify-off:confirm:(\d{1,20}):(\d{1,20})$/u.exec(componentId);
+    if (notifyOff) {
+      const [, guildId, channelId] = notifyOff;
+      const response = await this.env.DISCORD_GATEKEEPER.fetch(
+        "https://discord-gatekeeper.internal/internal/v1/destinations", {
+          method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+            deploymentId: this.env.DEPLOYMENT_ID, principalId: link.ownerPrincipalId,
+            destinationId: `discord-destination:guild:${guildId}:${channelId}`,
+          }),
+        },
+      );
+      return { content: response.ok
+        ? "Notifications are disabled for this channel."
+        : "Notifications could not be disabled for this channel.", ephemeral: true };
+    }
+    const match = /^discord:approval:(review|approve|reject):(approval:[0-9a-f-]{36})$/u.exec(componentId);
+    if (!match) return { content: "This action is not supported.", ephemeral: true };
+    const action = match[1];
+    const approvalId = match[2] ?? "";
+    if (action === "review") {
+      const response = await this.internal(link, "/v1/approvals");
+      const value = await responseObject(response);
+      const approvals = Array.isArray(value["approvals"])
+        ? value["approvals"] as Record<string, unknown>[] : [];
+      const approval = approvals.find((item) => item["approvalId"] === approvalId);
+      if (!approval || approval["status"] !== "pending") {
+        return { content: "This approval is no longer pending.", ephemeral: true };
+      }
+      return { content: `${displayValue(approval["capabilityId"])}\n\`\`\`json\n${JSON.stringify(approval["preview"], null, 2).slice(0, 1_500)}\n\`\`\``,
+        ephemeral: true, components: [{ type: 1, components: [
+          { type: 2, style: 3, label: "Approve", custom_id: `discord:approval:approve:${approvalId}` },
+          { type: 2, style: 4, label: "Reject", custom_id: `discord:approval:reject:${approvalId}` },
+        ] }] };
+    }
+    const response = await this.internal(link, `/v1/approvals/${encodeURIComponent(approvalId)}`, {
+      method: "POST", headers: { "Idempotency-Key": `discord:${componentId}` },
+      body: JSON.stringify({ decision: action === "approve" ? "approved" : "rejected" }),
+    });
+    const value = await responseObject(response);
+    const error = displayValue(value["title"] ?? value["code"]) || "APPROVAL_EXECUTION_FAILED";
+    const executionStatus = displayValue(value["executionStatus"]);
+    return { content: response.ok ? `Approval ${action === "approve" ? "approved" : "rejected"}.`
+      : action === "approve" && executionStatus
+        ? `Approval approved; execution ${executionStatus}: ${error}`
+        : error || "This approval could not be changed.", ephemeral: true };
+  }
+
+  async handleDiscord(input: DiscordAssistantRequest): Promise<DiscordAssistantResponse> {
+    if (input.commandName === "link") return this.link(input);
+    const link = await this.resolve(input.discordUserId);
+    if (!link) return { content: "This Discord user is not linked to the owner workspace.", ephemeral: true };
+    if (requiresApprovedDiscordGuild(input.commandName) &&
+      !await this.guildAllowed(link, input.guildId, input.channelId)) {
+      return { content: "This guild channel is not approved for agent commands.", ephemeral: true };
+    }
+    if (input.commandName === "component" && input.componentId) {
+      return this.approvalComponent(link, input.componentId);
+    }
+    if (input.commandName === "agent") {
+      const message = input.options["message"];
+      if (typeof message !== "string") return { content: "A message is required.", ephemeral: true };
+      const response = await this.internal(link,
+        `/v1/conversations/${encodeURIComponent(link.conversationId)}/messages`, {
+          method: "POST", headers: { "Idempotency-Key": `discord:${input.interactionId}`,
+            "x-opap-message-source": "discord" },
+          body: JSON.stringify({ content: message }),
+        });
+      const value = await responseObject(response);
+      const assistant = typeof value["assistant"] === "object" && value["assistant"] !== null
+        ? value["assistant"] as Record<string, unknown> : {};
+      return { content: response.ok ? displayValue(assistant["content"]).slice(0, 2_000)
+        : displayValue(value["title"] ?? value["code"]) || "The agent request failed.", ephemeral: true };
+    }
+    if (input.commandName === "timezone") {
+      const subcommand = input.options["subcommand"];
+      if (subcommand === "show") {
+        return { content: `Owner time zone: ${await this.ownerTimeZone()}`, ephemeral: true };
+      }
+      const timeZone = input.options["value"];
+      if (subcommand !== "set" || typeof timeZone !== "string") {
+        return { content: "A valid IANA time zone is required.", ephemeral: true };
+      }
+      const response = await this.internal(link, "/v1/settings/preferences", {
+        method: "PATCH", headers: { "Idempotency-Key": `discord:${input.interactionId}` },
+        body: JSON.stringify({ timeZone }),
+      });
+      const value = await responseObject(response);
+      return { content: response.ok ? `Owner time zone: ${displayValue(value["timeZone"])}`
+        : displayValue(value["code"] ?? value["title"]) || "The time zone could not be changed.",
+        ephemeral: true };
+    }
+    if (input.commandName === "tasks") {
+      const subcommand = input.options["subcommand"];
+      if (subcommand === "list") {
+        const response = await this.internal(link,
+          `/v1/tasks?conversationId=${encodeURIComponent(link.conversationId)}`);
+        const value = await responseObject(response);
+        const tasks = Array.isArray(value["tasks"]) ? value["tasks"] as Record<string, unknown>[] : [];
+        return { content: tasks.length ? tasks.slice(0, 20).map((task) =>
+          `• ${displayValue(task["title"])} [${displayValue(task["status"])}]${task["nextRunAt"] ? `\n  Next: ${displayValue(task["nextRunAt"])}` : ""}\n  ${displayValue(task["taskId"])}`).join("\n")
+          : "No tasks were found.", ephemeral: true };
+      }
+      const suppliedTaskId = displayValue(input.options["task"]);
+      const taskId = suppliedTaskId && !suppliedTaskId.startsWith("task:")
+        ? `task:${suppliedTaskId}` : suppliedTaskId;
+      const createsTask = subcommand === "once" || subcommand === "repeat";
+      const method = createsTask ? "POST"
+        : subcommand === "delete" ? "DELETE" : "PATCH";
+      const path = createsTask ? "/v1/tasks"
+        : `/v1/tasks/${encodeURIComponent(taskId)}`;
+      const body: Record<string, unknown> = {
+        conversationId: link.conversationId, title: input.options["title"],
+        description: input.options["description"], status: input.options["status"],
+      };
+      if (subcommand === "once") {
+        const timeZone = await this.ownerTimeZone();
+        body["schedule"] = discordTaskSchedule({ ...input.options, repeat: "once" },
+          timeZone);
+        body["enabled"] = true;
+      } else if (subcommand === "repeat") {
+        body["schedule"] = discordTaskSchedule(input.options, await this.ownerTimeZone());
+        body["enabled"] = true;
+      } else if (subcommand === "unschedule") {
+        body["schedule"] = { kind: "none" };
+        body["enabled"] = false;
+      }
+      const response = await this.internal(link, path, {
+        method, headers: { "Idempotency-Key": `discord:${input.interactionId}` }, body: JSON.stringify({
+          ...body,
+        }),
+      });
+      const value = await responseObject(response);
+      const operation = createsTask ? "created" : subcommand === "delete" ? "deleted"
+        : subcommand === "unschedule" ? "unscheduled" : "updated";
+      const taskReference = createsTask && response.ok ? `\n${displayValue(value["taskId"])}` : "";
+      return { content: response.ok ? `The task was ${operation}.${taskReference}`
+        : displayValue(value["code"] ?? value["title"]) || "The task operation failed.", ephemeral: true };
+    }
+    if (input.commandName === "approvals") {
+      const response = await this.internal(link, "/v1/approvals");
+      const value = await responseObject(response);
+      const approvals = (Array.isArray(value["approvals"])
+        ? value["approvals"] as Record<string, unknown>[] : []).filter((item) => item["status"] === "pending").slice(0, 20);
+      return { content: approvals.length ? approvals.map((approval) =>
+        `• ${displayValue(approval["capabilityId"])} (${displayValue(approval["approvalId"])})`).join("\n")
+        : "No approvals are pending.", ephemeral: true,
+        components: approvals.slice(0, 5).map((approval) => ({ type: 1, components: [{ type: 2,
+          style: 2, label: `Review ${displayValue(approval["capabilityId"]).slice(0, 60)}`,
+          custom_id: `discord:approval:review:${displayValue(approval["approvalId"])}` }] })) };
+    }
+    if (input.commandName === "audit") {
+      const response = await this.internal(link, "/v1/audit");
+      const value = await responseObject(response);
+      const events = Array.isArray(value["events"]) ? value["events"] as Record<string, unknown>[] : [];
+      return { content: events.length ? events.slice(0, 20).map((event) =>
+        `• ${displayValue(event["eventType"])} — ${displayValue(event["outcome"])} — ${displayValue(event["occurredAt"])}`).join("\n")
+        : "No audit events were found.", ephemeral: true };
+    }
+    if (input.commandName === "notify-here") {
+      if (!input.guildId || !input.channelId) return { content: "Use this command in a guild channel.", ephemeral: true };
+      const operation = { guildId: input.guildId, channelId: input.channelId,
+        displayPolicy: "metadata-only", commandPolicy: "approved-only" } as const;
+      const response = await this.env.CONTROL.fetch("https://control.internal/internal/v1/approvals", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: this.env.DEPLOYMENT_ID, principalId: link.ownerPrincipalId,
+          capabilityId: "discord.notification-destinations.configure", gatekeeperId: "gatekeeper:discord",
+          taskId: `task:${crypto.randomUUID()}`, request: operation,
+          requestDigest: await createRequestDigest(operation), preview: operation,
+          requestId: input.interactionId, idempotencyKey: `discord:${input.interactionId}`,
+        }),
+      });
+      const value = await responseObject(response);
+      return { content: response.ok ? `Notification destination approval is pending. (${displayValue(value["approvalId"])})`
+        : "The notification destination request failed.", ephemeral: true };
+    }
+    if (input.commandName === "notify-off-here") {
+      if (!input.guildId || !input.channelId) {
+        return { content: "Use this command in a guild channel.", ephemeral: true };
+      }
+      const destinationsResponse = await this.env.DISCORD_GATEKEEPER.fetch(
+        `https://discord-gatekeeper.internal/internal/v1/destinations?deploymentId=${encodeURIComponent(this.env.DEPLOYMENT_ID)}`,
+      );
+      const destinationsValue = await responseObject(destinationsResponse);
+      const destinations = Array.isArray(destinationsValue["destinations"])
+        ? destinationsValue["destinations"] as Record<string, unknown>[] : [];
+      if (!destinations.some((destination) => destination["kind"] === "guild-channel" &&
+        destination["guildId"] === input.guildId && destination["channelId"] === input.channelId)) {
+        return { content: "Notifications are not enabled for this channel.", ephemeral: true };
+      }
+      return { content: "Disable Open Personal Agent notifications for this channel?", ephemeral: true,
+        components: [{ type: 1, components: [{ type: 2, style: 4, label: "Disable notifications",
+          custom_id: `discord:notify-off:confirm:${input.guildId}:${input.channelId}` }] }] };
+    }
+    if (input.commandName === "unlink") return { content: "Disconnect this Discord user from the owner workspace?",
+      ephemeral: true, components: [{ type: 1, components: [{ type: 2, style: 4,
+        label: "Disconnect", custom_id: "discord:unlink:confirm" }] }] };
+    if (input.commandName === "status") return { content: `Discord link: active\nConversation: ${link.conversationId}\nGateway bridge: experimental`, ephemeral: true };
+    return { content: "This command is not supported.", ephemeral: true };
+  }
+
+  async handleDiscordGateway(input: { gatewayMessageId: string; discordUserId: string;
+    displayName?: string; content: string }): Promise<DiscordAssistantResponse> {
+    const link = await this.resolve(input.discordUserId);
+    if (!link) return { content: "This Discord user is not linked to the owner workspace." };
+    const response = await this.internal(link,
+      `/v1/conversations/${encodeURIComponent(link.conversationId)}/messages`, {
+        method: "POST", headers: { "Idempotency-Key": `discord-gateway:${input.gatewayMessageId}`,
+          "x-opap-message-source": "discord-gateway" },
+        body: JSON.stringify({ content: input.content }),
+      });
+    const value = await responseObject(response);
+    const assistant = typeof value["assistant"] === "object" && value["assistant"] !== null
+      ? value["assistant"] as Record<string, unknown> : {};
+    return { content: response.ok ? displayValue(assistant["content"]).slice(0, 2_000)
+      : "The agent request failed." };
+  }
+}
 
 const app = createAssistantApp({
   authorizeOwner: authorizeConfiguredOwner,

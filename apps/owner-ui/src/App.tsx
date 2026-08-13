@@ -61,6 +61,98 @@ const display = (value: unknown, fallback = ""): string =>
 const localizedError = (reason: unknown, t: Translate, fallback: MessageKey): string =>
   reason instanceof Error ? reason.message : t(fallback);
 
+const defaultTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Tokyo";
+
+const fixedOffsetTimeZones = (): string[] => Array.from({ length: 105 }, (_, index) => {
+  const totalMinutes = -12 * 60 + index * 15;
+  if (totalMinutes === 0) return "UTC";
+  const sign = totalMinutes < 0 ? "-" : "+";
+  const absoluteMinutes = Math.abs(totalMinutes);
+  return `${sign}${String(Math.floor(absoluteMinutes / 60)).padStart(2, "0")}:${String(absoluteMinutes % 60).padStart(2, "0")}`;
+});
+
+const supportedTimeZones = (): string[] => {
+  const extendedIntl = Intl as typeof Intl & {
+    supportedValuesOf?: (key: "timeZone") => string[];
+  };
+  const zones = extendedIntl.supportedValuesOf?.("timeZone") ?? [
+    "Africa/Cairo", "America/Los_Angeles", "America/New_York", "Asia/Singapore",
+    "Asia/Tokyo", "Australia/Sydney", "Europe/London", "Europe/Paris",
+  ];
+  return [...new Set([...fixedOffsetTimeZones(), ...zones])];
+};
+
+const timeZoneOptions = supportedTimeZones();
+
+const scheduleFromForm = (form: FormData, ownerTimeZone: string): ApiRecord | undefined => {
+  const kind = formText(form, "scheduleKind");
+  if (kind === "once") {
+    const value = formText(form, "onceAt");
+    const epoch = Date.parse(value);
+    return Number.isFinite(epoch) ? { kind, at: new Date(epoch).toISOString() } : undefined;
+  }
+  const time = formText(form, "scheduleTime");
+  const timeZone = ownerTimeZone;
+  if (kind === "daily") return { kind, time, timeZone };
+  if (kind === "weekly") {
+    return { kind, time, timeZone, weekdays: form.getAll("weekdays").map(Number) };
+  }
+  if (kind === "monthly") {
+    return { kind, time, timeZone, dayOfMonth: Number(form.get("dayOfMonth")) };
+  }
+  return undefined;
+};
+
+const localDateTimeValue = (value: unknown): string => {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+};
+
+const scheduleRecord = (item?: ApiRecord): ApiRecord =>
+  item && typeof item["schedule"] === "object" && item["schedule"] !== null
+    ? item["schedule"] as ApiRecord : { kind: "once" };
+
+function TaskScheduleFields({ item, t, ownerTimeZone }: { item?: ApiRecord; t: Translate; ownerTimeZone: string }) {
+  const schedule = scheduleRecord(item);
+  const weekdays = Array.isArray(schedule["weekdays"])
+    ? schedule["weekdays"].filter((day): day is number => typeof day === "number") : [];
+  return <details className="task-schedule-fields" open>
+    <summary>{t("tasks.schedule")}</summary>
+    <label>{t("tasks.repeat")}
+      <select name="scheduleKind" defaultValue={display(schedule["kind"], "once")}>
+        <option value="once">{t("tasks.repeatOnce")}</option>
+        <option value="daily">{t("tasks.repeatDaily")}</option>
+        <option value="weekly">{t("tasks.repeatWeekly")}</option>
+        <option value="monthly">{t("tasks.repeatMonthly")}</option>
+      </select>
+    </label>
+    <label>{t("tasks.onceAt")}
+      <input name="onceAt" type="datetime-local" defaultValue={localDateTimeValue(schedule["at"])} />
+    </label>
+    <label>{t("tasks.time")}
+      <input name="scheduleTime" type="time" defaultValue={display(schedule["time"], "08:00")} />
+    </label>
+    <small>{t("tasks.usingTimeZone", { timeZone: ownerTimeZone })}</small>
+    <fieldset>
+      <legend>{t("tasks.weekdays")}</legend>
+      {[0, 1, 2, 3, 4, 5, 6].map((day) => <label className="check" key={day}>
+        <input name="weekdays" type="checkbox" value={day} defaultChecked={weekdays.includes(day)} />
+        {t(`tasks.weekday${day}` as MessageKey)}
+      </label>)}
+    </fieldset>
+    <label>{t("tasks.dayOfMonth")}
+      <input name="dayOfMonth" type="number" min="1" max="31"
+        defaultValue={display(schedule["dayOfMonth"], "1")} />
+    </label>
+    {item && <label className="check">
+      <input name="taskEnabled" type="checkbox" defaultChecked={item?.["enabled"] !== false} />
+      {t("tasks.enabled")}
+    </label>}
+  </details>;
+}
+
 export function App() {
   const { locale, setLocale, t } = useLocale();
   const { theme, toggleTheme } = useTheme();
@@ -79,6 +171,10 @@ export function App() {
   const [workersAiActive, setWorkersAiActive] = useState(false);
   const [approvalToolQueries, setApprovalToolQueries] = useState<Record<string, string>>({});
   const [approvalToolSelections, setApprovalToolSelections] = useState<Record<string, string>>({});
+  const [discordLinkCode, setDiscordLinkCode] = useState<ApiRecord>();
+  const [discordCodeCopied, setDiscordCodeCopied] = useState(false);
+  const [ownerTimeZone, setOwnerTimeZone] = useState(defaultTimeZone);
+  const [ownerTimeZoneDraft, setOwnerTimeZoneDraft] = useState(defaultTimeZone);
   const loadSequence = useRef(0);
   const conversationList = useRef<HTMLElement>(null);
   const request = useCallback(
@@ -96,10 +192,19 @@ export function App() {
         nextData = conversationId
           ? await request(`/v1/conversations/${encodeURIComponent(conversationId)}`)
           : {};
-      } else if (tab === "tasks" || tab === "memory") {
-        const resource = tab === "memory" ? "memories" : "tasks";
+      } else if (tab === "tasks") {
+        const [tasks, preferences] = await Promise.all([
+          conversationId ? request(`/v1/tasks?conversationId=${encodeURIComponent(conversationId)}`) : Promise.resolve({}),
+          request("/v1/settings/preferences"),
+        ]);
+        if (sequence === loadSequence.current && typeof preferences["timeZone"] === "string") {
+          setOwnerTimeZone(preferences["timeZone"]);
+          setOwnerTimeZoneDraft(preferences["timeZone"]);
+        }
+        nextData = tasks;
+      } else if (tab === "memory") {
         nextData = conversationId
-          ? await request(`/v1/${resource}?conversationId=${encodeURIComponent(conversationId)}`)
+          ? await request(`/v1/memories?conversationId=${encodeURIComponent(conversationId)}`)
           : {};
       } else if (tab === "approvals") {
         nextData = await request("/v1/approvals");
@@ -127,6 +232,21 @@ export function App() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (tab !== "conversation" || !conversationId) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    const interval = window.setInterval(refreshWhenVisible, 15_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [conversationId, load, tab]);
 
   useEffect(() => {
     void request("/v1/settings/providers").then((settings) => {
@@ -202,13 +322,29 @@ export function App() {
           return;
         }
       } else if (tab === "tasks") {
+        const schedule = scheduleFromForm(form, ownerTimeZone);
+        if (!schedule) throw new Error(t("errors.invalidTaskSchedule"));
+        let taskConversationId = conversationId;
+        if (!taskConversationId) {
+          const createdConversation = await request("/v1/conversations", {
+            method: "POST",
+            headers: { "Idempotency-Key": crypto.randomUUID() },
+            body: "{}",
+          });
+          taskConversationId = display(createdConversation["conversationId"]);
+          if (!taskConversationId) throw new Error(t("errors.save"));
+          setConversationId(taskConversationId);
+          localStorage.setItem("opap.conversationId", taskConversationId);
+        }
         await request("/v1/tasks", {
           method: "POST",
           headers: { "Idempotency-Key": crypto.randomUUID() },
           body: JSON.stringify({
-            conversationId,
+            conversationId: taskConversationId,
             title: formText(form, "title"),
             description: formText(form, "description"),
+            schedule,
+            enabled: true,
           }),
         });
       } else if (tab === "memory") {
@@ -299,6 +435,25 @@ export function App() {
     }
   };
 
+  const reconcile = async (approvalId: string, executionStatus: "succeeded" | "failed") => {
+    const confirmationKey = executionStatus === "succeeded"
+      ? "approvals.reconcileSucceededConfirm" : "approvals.reconcileFailedConfirm";
+    if (!window.confirm(t(confirmationKey))) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/approvals/${encodeURIComponent(approvalId)}/reconcile`, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ executionStatus }),
+      });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.approval"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const changeApprovalTool = async (item: ApiRecord) => {
     const approvalId = display(item["approvalId"]);
     const preview = typeof item["preview"] === "object" && item["preview"] !== null
@@ -365,6 +520,118 @@ export function App() {
     }
   };
 
+  const createDiscordLinkCode = async () => {
+    if (!conversationId) {
+      setError(t("connections.discordConversationRequired"));
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setDiscordCodeCopied(false);
+    try {
+      setDiscordLinkCode(await request("/v1/connections/discord/link-code", {
+        method: "POST", body: JSON.stringify({ conversationId }),
+      }));
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyDiscordLinkCode = async () => {
+    const code = display(discordLinkCode?.["code"]);
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setDiscordCodeCopied(true);
+    } catch (reason) {
+      setError(localizedError(reason, t, "connections.discordCopyFailed"));
+    }
+  };
+
+  const syncDiscordCommands = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await request("/v1/connections/discord/commands/sync", { method: "POST" });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnectDiscord = async () => {
+    if (!window.confirm(t("connections.discordDisconnectConfirm"))) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request("/v1/connections/discord", { method: "DELETE" });
+      setDiscordLinkCode(undefined);
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveOwnerTimeZone = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const timeZone = formText(form, "ownerTimeZone");
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await request("/v1/settings/preferences", { method: "PATCH",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ timeZone }),
+      });
+      setOwnerTimeZone(display(saved["timeZone"], timeZone));
+      setOwnerTimeZoneDraft(display(saved["timeZone"], timeZone));
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateDiscordDestination = async (destination: ApiRecord,
+    displayPolicy: string, commandPolicy: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/connections/discord/destinations/${encodeURIComponent(display(destination["destinationId"]))}`, {
+        method: "PATCH", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
+          guildId: destination["guildId"], channelId: destination["channelId"],
+          displayPolicy, commandPolicy,
+        }),
+      });
+      setTab("approvals");
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeDiscordDestination = async (destinationId: string) => {
+    if (!window.confirm(t("connections.discordDestinationRevokeConfirm"))) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/connections/discord/destinations/${encodeURIComponent(destinationId)}`, {
+        method: "DELETE",
+      });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.connection"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveEdit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!editingItem || !conversationId) return;
@@ -374,6 +641,8 @@ export function App() {
     try {
       if (tab === "tasks") {
         const taskId = display(editingItem["taskId"]);
+        const schedule = scheduleFromForm(form, ownerTimeZone);
+        if (!schedule) throw new Error(t("errors.invalidTaskSchedule"));
         await request(`/v1/tasks/${encodeURIComponent(taskId)}`, {
           method: "PATCH",
           headers: { "Idempotency-Key": crypto.randomUUID() },
@@ -382,6 +651,8 @@ export function App() {
             title: formText(form, "title"),
             description: formText(form, "description"),
             status: formText(form, "status"),
+            schedule,
+            enabled: form.get("taskEnabled") === "on",
           }),
         });
       } else if (tab === "memory") {
@@ -460,6 +731,13 @@ export function App() {
     ? collection.filter((connection) =>
         connection["providerId"] === "github" && connection["status"] === "active")
     : [];
+  const discord = typeof data["discord"] === "object" && data["discord"] !== null
+    ? data["discord"] as ApiRecord : {};
+  const discordLink = typeof discord["link"] === "object" && discord["link"] !== null
+    ? discord["link"] as ApiRecord : undefined;
+  const discordInstallUrls = typeof discord["installUrls"] === "object" && discord["installUrls"] !== null
+    ? discord["installUrls"] as ApiRecord : {};
+  const discordDestinations = rows(discord["destinations"]);
   const activeTab = tabs.find((item) => item.id === tab);
 
   return <div className="shell">
@@ -576,13 +854,92 @@ export function App() {
               {t(activeGitHubConnections.length > 0 ? "connections.addGitHubAccount" : "connections.connectGitHub")}
             </button>
           </section>
+          <section className="connection-actions discord-connection">
+            <div>
+              <strong>Discord</strong>
+              <p>{t("connections.discordHelp")}</p>
+              {discordLink && <p>{t("connections.discordLinkedUser")}: {display(
+                discordLink["displayName"] ?? discordLink["discordUserId"],
+              )}</p>}
+              {discordLinkCode && <div className="link-code">
+                <strong>{t("connections.discordLinkCode")}</strong>
+                <div className="link-code-value">
+                  <code>{display(discordLinkCode["code"])}</code>
+                  <button type="button" className="quiet" onClick={() => void copyDiscordLinkCode()}>
+                    {t(discordCodeCopied ? "connections.discordCodeCopied" : "connections.discordCopyCode")}
+                  </button>
+                </div>
+                <small>{t("connections.discordLinkCodeExpiry")}: {display(discordLinkCode["expiresAt"])}</small>
+              </div>}
+              {discordDestinations.length > 0 && <div className="destination-list">
+                {discordDestinations.map((destination) => <form key={display(destination["destinationId"])}
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = new FormData(event.currentTarget);
+                    void updateDiscordDestination(destination,
+                      formText(form, "displayPolicy"), formText(form, "commandPolicy"));
+                  }}>
+                  <span>{display(destination["kind"])}: <code>{display(destination["channelId"])}</code></span>
+                  {destination["kind"] === "guild-channel" && <>
+                    <select name="displayPolicy" defaultValue={display(destination["displayPolicy"])}>
+                      <option value="metadata-only">metadata-only</option>
+                      <option value="full-preview">full-preview</option>
+                    </select>
+                    <select name="commandPolicy" defaultValue={display(destination["commandPolicy"])}>
+                      <option value="approved-only">approved-only</option>
+                      <option value="owner-any">owner-any</option>
+                      <option value="dm-only">dm-only</option>
+                    </select>
+                    <button disabled={busy}>{t("connections.discordRequestPolicyChange")}</button>
+                  </>}
+                  <button type="button" className="danger" disabled={busy}
+                    onClick={() => void revokeDiscordDestination(display(destination["destinationId"]))}>
+                    {t("connections.discordRevokeDestination")}
+                  </button>
+                </form>)}
+              </div>}
+            </div>
+            <div className="actions">
+              <button type="button" disabled={busy} onClick={() => void syncDiscordCommands()}>
+                {t("connections.discordSyncCommands")}
+              </button>
+              {!discordLink && <button type="button" disabled={busy || !conversationId}
+                onClick={() => void createDiscordLinkCode()}>
+                {t("connections.discordGenerateCode")}
+              </button>}
+              {typeof discordInstallUrls["user"] === "string" &&
+                <a className="button-link" href={display(discordInstallUrls["user"])} target="_blank" rel="noreferrer">
+                  {t("connections.discordUserInstall")}
+                </a>}
+              {typeof discordInstallUrls["guild"] === "string" &&
+                <a className="button-link" href={display(discordInstallUrls["guild"])} target="_blank" rel="noreferrer">
+                  {t("connections.discordGuildInstall")}
+                </a>}
+              {discordLink && <button type="button" className="danger" disabled={busy}
+                onClick={() => void disconnectDiscord()}>{t("connections.disconnect")}</button>}
+            </div>
+          </section>
         </>}
       {tab === "tasks" &&
+        <>
+        <form onSubmit={(event) => { void saveOwnerTimeZone(event); }} className="memory-form compact-form">
+          <label>{t("tasks.ownerTimeZone")}
+            <input name="ownerTimeZone" value={ownerTimeZoneDraft}
+              onChange={(event) => setOwnerTimeZoneDraft(event.currentTarget.value)} list="common-time-zones" required />
+          </label>
+          <datalist id="common-time-zones">
+            {timeZoneOptions.map((timeZone) =>
+              <option key={timeZone} value={timeZone}
+                label={timeZone.startsWith("+") || timeZone.startsWith("-") ? `UTC${timeZone}` : timeZone} />)}
+          </datalist>
+          <button disabled={busy}>{t("tasks.saveTimeZone")}</button>
+        </form>
         <form onSubmit={(event) => { void submit(event); }} className="memory-form">
           <input name="title" required maxLength={500} placeholder={t("tasks.placeholder")} />
           <textarea name="description" required maxLength={32768} placeholder={t("tasks.descriptionPlaceholder")} />
-          <button disabled={busy || !conversationId}>{t("tasks.add")}</button>
-        </form>}
+          <TaskScheduleFields t={t} ownerTimeZone={ownerTimeZone} />
+          <button disabled={busy}>{t("tasks.add")}</button>
+        </form></>}
       {tab === "memory" &&
         <form onSubmit={(event) => { void submit(event); }} className="memory-form">
           <input name="key" required maxLength={200} placeholder={t("memory.keyPlaceholder")} />
@@ -602,6 +959,7 @@ export function App() {
                   <option value="in-progress">{t("tasks.statusInProgress")}</option>
                   <option value="completed">{t("tasks.statusCompleted")}</option>
                 </select>
+                <TaskScheduleFields item={editingItem} t={t} ownerTimeZone={ownerTimeZone} />
               </>
             : <>
                 <label>{t("memory.keyLabel")}<input value={display(editingItem["key"])} disabled /></label>
@@ -658,6 +1016,11 @@ export function App() {
                                 <strong>{display(item["title"], t("item.fallback"))}</strong>
                                 <p>{display(item["description"], t("tasks.noDescription"))}</p>
                                 <small>{t("tasks.statusLabel")}: {display(item["status"])}</small>
+                                {typeof item["nextRunAt"] === "string" &&
+                                  <small>{t("tasks.nextRunAt")}: {new Date(item["nextRunAt"]).toLocaleString(locale)}</small>}
+                                {typeof item["lastRunAt"] === "string" &&
+                                  <small>{t("tasks.lastRunAt")}: {new Date(item["lastRunAt"]).toLocaleString(locale)} · {
+                                    display(item["lastRunStatus"])}</small>}
                               </>
                             : <>
                               <strong>{display(
@@ -724,6 +1087,13 @@ export function App() {
                           <button className="danger" disabled={busy} onClick={() => void decide(String(item["approvalId"]), "rejected")}>
                             {t("approvals.reject")}
                           </button>
+                        </div>}
+                      {tab === "approvals" && item["executionStatus"] === "unknown" &&
+                        <div className="actions">
+                          <button disabled={busy} onClick={() => void reconcile(
+                            String(item["approvalId"]), "succeeded")}>{t("approvals.confirmExecuted")}</button>
+                          <button className="danger" disabled={busy} onClick={() => void reconcile(
+                            String(item["approvalId"]), "failed")}>{t("approvals.confirmNotExecuted")}</button>
                         </div>}
                       {(tab === "tasks" || tab === "memory") &&
                         <div className="actions">

@@ -14,13 +14,28 @@ Phase 3では、Phase 2で確立したWorker境界を緩めずにGoogle、GitHub
 5. Discordの一回限りOwner Link、Conversation Reply、Approval Notification
 6. 外部書込が`unknown`になった場合の照合UI
 
-共通OAuth基盤、Google Personal Gatekeeper、GitHub Personal Gatekeeperは実装済みです。
+共通OAuth基盤、Google Personal Gatekeeper、GitHub Personal Gatekeeper、物理的に分離したDelegated Source Gatekeeperは実装済みです。
 Gmailは、正確な宛先、件名、本文をOwnerが承認した後にだけ送信します。
 送信先を配置時のAllowlistで制限しません。
 GitHubはRepository、Code、購読中のIssue、Pull Request、IssueまたはPull Requestのコメントを読み取ります。
 Issue作成とコメント投稿は、Ownerが内容を承認した後にだけ実行します。
 GitHubのコード変更とPull Request作成は実装しません。
-DiscordとDelegated Source Gatekeeperは実装中です。
+DiscordのHTTP Interaction、Owner Link、Command、通知先、実験的Gateway Bridgeは実装済みです。
+配置手順は[Discord Connector](discord-connector.md)に記載します。
+Delegated Source Gatekeeperは専用D1、専用OAuth Credential、読取専用Endpoint、Drive File・FolderまたはGitHub Repositoryの明示Allowlistを持ちます。
+Gmail、Calendar、書込Capabilityは呼び出せません。
+Phase 4で、この内部契約をSource ACL評価とDelegated Knowledge APIへ接続します。
+外部書込が`unknown`になった場合、Ownerは外部操作を自動再試行せず、実行済みまたは未実行として照合できます。
+
+## Delegated Sourceの配置境界
+
+`apps/delegated-source-gatekeeper`は専用D1と専用`CREDENTIAL_KEK`を使って配置します。
+`GOOGLE_CLIENT_SECRET`と`GITHUB_CLIENT_SECRET`は通常VariableではなくWorker Secretへ設定します。
+Google OAuth ClientとGitHub App InstallationはPersonal Gatekeeperと分けます。
+OAuth開始要求には、一つ以上のDrive File・Folder IDまたは`owner/repository`形式の識別子が必要です。
+Folder配下の文書を読む場合はGoogle Driveが返した親Folder IDを再検証し、対応するText Contentを最大1 MiBまで返します。
+このWorkerをAssistant WorkerまたはPublic Agent APIへBindingしません。
+Phase 4でDelegated APIだけへNamed Internal Service Bindingとして接続します。
 
 ## GitHub Appのstaging設定
 
@@ -55,6 +70,7 @@ Webhookによる自動取込は、署名検証専用の公開Workerを追加し�
 - GitHub AppはOAuth Scopeを要求せず、App PermissionとInstallation範囲で権限を制限します。
 - Refresh拒否時はConnectionを再同意待ちにし、広い権限のCredentialへFallbackしません。
 - Personal ConnectionとDelegated Source ConnectionはCredential、Scope、Database、Entrypointを分離します。
+- 配置前に`pnpm verify:execution-lease-keys`を実行し、Gatekeeperの検証鍵不一致を拒否します。
 
 Provider登録と実Credential Testは手動staging Workflowだけで実行します。
 Contributor CIはFake OAuth ServerとFake API Serverを使います。

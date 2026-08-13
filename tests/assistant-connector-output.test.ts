@@ -5,6 +5,7 @@ import {
   continuationIntentPrompt,
   formatConnectorResult,
   githubRepositoryFullNames,
+  inferGmailWriteToolCall,
   inferCalendarRange,
   isRepositoryIssueListRequest,
   normalConversationContext,
@@ -99,6 +100,8 @@ describe("assistant connector output", () => {
   });
 
   it.each([
+    ["user@example.com宛に件名『テスト』、本文『確認です』でGmail下書きを作成して", "google_gmail_draft_create"],
+    ["user@example.comにテストメールを送って", "google_gmail_send"],
     ["最近のメールを3件教えて", "google_gmail_search"],
     ["明日15時にテスト予定を作成して", "google_calendar_create_event"],
     ["今後2年間の予定は？", "google_calendar_list_events"],
@@ -107,5 +110,15 @@ describe("assistant connector output", () => {
     ["GitHubでアクセス可能なリポジトリは？", "github_repositories_list"],
   ])("routes %s only to %s", (prompt, expected) => {
     expect(selectConnectorToolNames(prompt)).toEqual([expected]);
+  });
+
+  it("builds a deterministic Gmail draft call from explicit fields", () => {
+    expect(inferGmailWriteToolCall(
+      "user@example.com宛に、件名「テスト」、本文「確認です。」でGmail下書きを作成して",
+      "google_gmail_draft_create",
+      "connection:google",
+    )).toEqual({ name: "google_gmail_draft_create", arguments: {
+      connectionId: "connection:google", to: "user@example.com", subject: "テスト", body: "確認です。",
+    } });
   });
 });

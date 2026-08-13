@@ -1,10 +1,12 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    "allowImportingTsExtensions": true
   },
   "include": [
     "eslint.config.js",
+    "scripts/**/*.ts",
     "vitest.config.ts",
     "tests/**/*.ts"
   ]

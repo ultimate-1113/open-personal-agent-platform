@@ -6,6 +6,7 @@ import {
   cloudCostPolicySchema,
   delegatedSourceAclSchema,
   modelProviderSettingSchema,
+  normalizeTimeZone,
   ownerModelSettingsSchema,
   type ModelProviderSetting,
   type JsonValue,
@@ -285,7 +286,8 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     typeof input["taskId"] !== "string" ||
     (input["gatekeeperId"] !== "gatekeeper:google-personal" &&
       input["gatekeeperId"] !== "gatekeeper:github-personal" &&
-      input["gatekeeperId"] !== "gatekeeper:model-router") ||
+      input["gatekeeperId"] !== "gatekeeper:model-router" &&
+      input["gatekeeperId"] !== "gatekeeper:discord") ||
     typeof input["requestId"] !== "string"
     || typeof input["idempotencyKey"] !== "string"
   ) {
@@ -296,11 +298,16 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     input["capabilityId"] !== "google.calendar.events.create" &&
     input["capabilityId"] !== "github.issues.create" &&
     input["capabilityId"] !== "github.issue-comments.create" &&
-    input["capabilityId"] !== "model.connector-results.send") {
+    input["capabilityId"] !== "model.connector-results.send" &&
+    input["capabilityId"] !== "discord.notification-destinations.configure" &&
+    input["capabilityId"] !== "discord.notification-policy.update" &&
+    input["capabilityId"] !== "discord.notifications.deliver") {
     return Response.json({ code: "CAPABILITY_NOT_ALLOWED" }, { status: 403 });
   }
   const expectedGatekeeper = String(input["capabilityId"]).startsWith("github.")
     ? "gatekeeper:github-personal"
+    : String(input["capabilityId"]).startsWith("discord.")
+      ? "gatekeeper:discord"
     : input["capabilityId"] === "model.connector-results.send"
       ? "gatekeeper:model-router" : "gatekeeper:google-personal";
   if (input["gatekeeperId"] !== expectedGatekeeper) {
@@ -342,6 +349,160 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     createdAt: now.toISOString(),
     expiresAt,
   }, { status: 201 });
+}
+
+type DiscordOwnerLinkRow = {
+  owner_principal_id: string;
+  discord_user_id: string;
+  discord_display_name: string | null;
+  conversation_id: string;
+  status: "active" | "revoked";
+  dm_notifications_enabled: number;
+  linked_at: string;
+  updated_at: string;
+  revoked_at: string | null;
+};
+
+const discordLinkJson = (row: DiscordOwnerLinkRow) => ({
+  ownerPrincipalId: row.owner_principal_id,
+  discordUserId: row.discord_user_id,
+  displayName: row.discord_display_name,
+  conversationId: row.conversation_id,
+  status: row.status,
+  dmNotificationsEnabled: row.dm_notifications_enabled === 1,
+  linkedAt: row.linked_at,
+  updatedAt: row.updated_at,
+  revokedAt: row.revoked_at,
+});
+
+async function createDiscordLinkCode(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" ||
+    typeof input["principalId"] !== "string" ||
+    typeof input["conversationId"] !== "string" ||
+    typeof input["codeDigest"] !== "string" || !/^[a-f0-9]{64}$/u.test(input["codeDigest"]) ||
+    typeof input["expiresAt"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  await env.CONTROL_DB.batch([
+    env.CONTROL_DB.prepare(
+      `DELETE FROM discord_link_codes
+       WHERE deployment_id = ? AND owner_principal_id = ? AND consumed_at IS NULL`,
+    ).bind(input["deploymentId"], input["principalId"]),
+    env.CONTROL_DB.prepare(
+      `INSERT INTO discord_link_codes
+       (deployment_id, code_digest, owner_principal_id, conversation_id,
+        expires_at, consumed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+    ).bind(input["deploymentId"], input["codeDigest"], input["principalId"],
+      input["conversationId"], input["expiresAt"], now),
+  ]);
+  await audit(env, { deploymentId: input["deploymentId"], principalId: input["principalId"],
+    eventType: "discord.link-code.created", outcome: "success",
+    requestId: crypto.randomUUID(), metadata: { expiresAt: input["expiresAt"] } });
+  return Response.json({ expiresAt: input["expiresAt"] }, { status: 201 });
+}
+
+async function consumeDiscordLinkCode(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" || typeof input["codeDigest"] !== "string" ||
+    typeof input["discordUserId"] !== "string" ||
+    (input["displayName"] !== undefined && typeof input["displayName"] !== "string")) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const row = await env.CONTROL_DB.prepare(
+    `SELECT owner_principal_id, conversation_id, expires_at, consumed_at
+     FROM discord_link_codes WHERE deployment_id = ? AND code_digest = ?`,
+  ).bind(input["deploymentId"], input["codeDigest"]).first<{
+    owner_principal_id: string; conversation_id: string; expires_at: string; consumed_at: string | null;
+  }>();
+  const now = new Date();
+  if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= now.getTime()) {
+    return Response.json({ code: "DISCORD_LINK_CODE_INVALID" }, { status: 409 });
+  }
+  const conflictingOwner = await env.CONTROL_DB.prepare(
+    `SELECT discord_user_id FROM discord_owner_links
+     WHERE deployment_id = ? AND owner_principal_id = ? AND status = 'active'`,
+  ).bind(input["deploymentId"], row.owner_principal_id).first<{ discord_user_id: string }>();
+  if (conflictingOwner && conflictingOwner.discord_user_id !== input["discordUserId"]) {
+    return Response.json({ code: "DISCORD_OTHER_USER_ALREADY_LINKED" }, { status: 409 });
+  }
+  const conflictingUser = await env.CONTROL_DB.prepare(
+    `SELECT owner_principal_id FROM discord_owner_links
+     WHERE deployment_id = ? AND discord_user_id = ? AND status = 'active'`,
+  ).bind(input["deploymentId"], input["discordUserId"]).first<{ owner_principal_id: string }>();
+  if (conflictingUser && conflictingUser.owner_principal_id !== row.owner_principal_id) {
+    return Response.json({ code: "DISCORD_USER_ALREADY_LINKED" }, { status: 409 });
+  }
+  const consumedAt = now.toISOString();
+  const consumed = await env.CONTROL_DB.prepare(
+    `UPDATE discord_link_codes SET consumed_at = ?
+     WHERE deployment_id = ? AND code_digest = ? AND consumed_at IS NULL AND expires_at > ?`,
+  ).bind(consumedAt, input["deploymentId"], input["codeDigest"], consumedAt).run();
+  if (consumed.meta.changes !== 1) {
+    return Response.json({ code: "DISCORD_LINK_CODE_REPLAY" }, { status: 409 });
+  }
+  await env.CONTROL_DB.prepare(
+    `INSERT INTO discord_owner_links
+     (deployment_id, owner_principal_id, discord_user_id, discord_display_name,
+      conversation_id, status, dm_notifications_enabled, linked_at, updated_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, NULL)
+     ON CONFLICT (deployment_id, owner_principal_id) DO UPDATE SET
+       discord_user_id = excluded.discord_user_id,
+       discord_display_name = excluded.discord_display_name,
+       conversation_id = excluded.conversation_id,
+       status = 'active', dm_notifications_enabled = 1,
+       updated_at = excluded.updated_at, revoked_at = NULL`,
+  ).bind(input["deploymentId"], row.owner_principal_id, input["discordUserId"],
+    input["displayName"] ?? null, row.conversation_id, consumedAt, consumedAt).run();
+  await audit(env, { deploymentId: input["deploymentId"], principalId: row.owner_principal_id,
+    eventType: "discord.linked", outcome: "success", requestId: crypto.randomUUID(),
+    metadata: { discordUserId: input["discordUserId"] } });
+  return Response.json({ ownerPrincipalId: row.owner_principal_id,
+    conversationId: row.conversation_id, linkedAt: consumedAt });
+}
+
+async function getDiscordLink(request: Request, env: Bindings, resolveByUser: boolean): Promise<Response> {
+  const url = new URL(request.url);
+  const deploymentId = url.searchParams.get("deploymentId");
+  const identity = url.searchParams.get(resolveByUser ? "discordUserId" : "principalId");
+  if (!deploymentId || !identity) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  const field = resolveByUser ? "discord_user_id" : "owner_principal_id";
+  const row = await env.CONTROL_DB.prepare(
+    `SELECT owner_principal_id, discord_user_id, discord_display_name, conversation_id,
+            status, dm_notifications_enabled, linked_at, updated_at, revoked_at
+     FROM discord_owner_links WHERE deployment_id = ? AND ${field} = ? AND status = 'active'`,
+  ).bind(deploymentId, identity).first<DiscordOwnerLinkRow>();
+  return row ? Response.json({ link: discordLinkJson(row) })
+    : Response.json({ code: "DISCORD_LINK_NOT_FOUND" }, { status: 404 });
+}
+
+async function revokeDiscordLink(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" || typeof input["principalId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  await env.CONTROL_DB.prepare(
+    `UPDATE discord_owner_links SET status = 'revoked', revoked_at = ?, updated_at = ?
+     WHERE deployment_id = ? AND owner_principal_id = ? AND status = 'active'`,
+  ).bind(now, now, input["deploymentId"], input["principalId"]).run();
+  await audit(env, { deploymentId: input["deploymentId"], principalId: input["principalId"],
+    eventType: "discord.unlinked", outcome: "success", requestId: crypto.randomUUID(), metadata: {} });
+  return new Response(null, { status: 204 });
 }
 
 async function decideApproval(request: Request, env: Bindings): Promise<Response> {
@@ -470,6 +631,42 @@ async function recordApprovalExecution(request: Request, env: Bindings): Promise
   });
   return audited
     ? Response.json({ executionStatus: input["executionStatus"], executedAt: now })
+    : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+}
+
+async function reconcileApprovalExecution(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" || typeof input["principalId"] !== "string" ||
+    typeof input["approvalId"] !== "string" ||
+    (input["executionStatus"] !== "succeeded" && input["executionStatus"] !== "failed") ||
+    typeof input["requestId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  const updated = await env.CONTROL_DB.prepare(
+    `UPDATE approvals SET execution_status = ?, execution_error_code = ?, executed_at = ?
+     WHERE deployment_id = ? AND approval_id = ? AND principal_id = ? AND status = 'approved'
+       AND execution_status = 'unknown'`,
+  ).bind(input["executionStatus"], input["executionStatus"] === "failed"
+    ? "OWNER_CONFIRMED_NOT_EXECUTED" : null, now, input["deploymentId"],
+    input["approvalId"], input["principalId"]).run();
+  if (updated.meta.changes !== 1) {
+    return Response.json({ code: "APPROVAL_EXECUTION_NOT_UNKNOWN" }, { status: 409 });
+  }
+  const audited = await audit(env, {
+    deploymentId: input["deploymentId"], principalId: input["principalId"],
+    eventType: "approval.execution.reconciled",
+    outcome: input["executionStatus"] === "succeeded" ? "success" : "failure",
+    requestId: input["requestId"],
+    metadata: { approvalId: input["approvalId"], executionStatus: input["executionStatus"],
+      source: "owner-external-verification" },
+  });
+  return audited
+    ? Response.json({ executionStatus: input["executionStatus"], reconciledAt: now })
     : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
 }
 
@@ -673,6 +870,65 @@ async function providerSettings(request: Request, env: Bindings): Promise<Respon
   return Response.json(settings.data);
 }
 
+async function ownerPreferences(request: Request, env: Bindings): Promise<Response> {
+  const url = new URL(request.url);
+  const deploymentId = url.searchParams.get("deploymentId");
+  if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  const current = await env.CONTROL_DB.prepare(
+    `SELECT time_zone, last_idempotency_key, last_update_fingerprint, updated_at
+     FROM owner_preferences WHERE deployment_id = ?`,
+  ).bind(deploymentId).first<{ time_zone: string; last_idempotency_key: string | null;
+    last_update_fingerprint: string | null; updated_at: string }>();
+  if (request.method === "GET") {
+    return current ? Response.json({ timeZone: current.time_zone, updatedAt: current.updated_at })
+      : Response.json({ code: "OWNER_PREFERENCES_NOT_SET" }, { status: 404 });
+  }
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const body = value as Record<string, unknown>;
+  const timeZone = normalizeTimeZone(body["timeZone"]);
+  if (!timeZone || typeof body["principalId"] !== "string" ||
+    typeof body["requestId"] !== "string" || typeof body["idempotencyKey"] !== "string") {
+    return Response.json({ code: "INVALID_TIME_ZONE" }, { status: 400 });
+  }
+  const fingerprint = await sha256Hex(timeZone);
+  if (current?.last_idempotency_key === body["idempotencyKey"]) {
+    return current.last_update_fingerprint === fingerprint
+      ? Response.json({ timeZone: current.time_zone, updatedAt: current.updated_at })
+      : Response.json({ code: "IDEMPOTENCY_CONFLICT" }, { status: 409 });
+  }
+  const now = new Date().toISOString();
+  await env.CONTROL_DB.prepare(
+    `INSERT INTO owner_preferences
+     (deployment_id, time_zone, last_idempotency_key, last_update_fingerprint, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(deployment_id) DO UPDATE SET time_zone = excluded.time_zone,
+       last_idempotency_key = excluded.last_idempotency_key,
+       last_update_fingerprint = excluded.last_update_fingerprint,
+       updated_at = excluded.updated_at`,
+  ).bind(deploymentId, timeZone, body["idempotencyKey"], fingerprint, now).run();
+  const audited = await audit(env, { deploymentId, principalId: body["principalId"],
+    eventType: "owner.time-zone.changed", outcome: "success", requestId: body["requestId"],
+    metadata: { timeZone },
+  });
+  if (!audited) {
+    if (current) {
+      await env.CONTROL_DB.prepare(
+        `UPDATE owner_preferences SET time_zone = ?, last_idempotency_key = ?,
+         last_update_fingerprint = ?, updated_at = ? WHERE deployment_id = ?`,
+      ).bind(current.time_zone, current.last_idempotency_key, current.last_update_fingerprint,
+        current.updated_at, deploymentId).run();
+    } else {
+      await env.CONTROL_DB.prepare("DELETE FROM owner_preferences WHERE deployment_id = ?")
+        .bind(deploymentId).run();
+    }
+    return Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+  }
+  return Response.json({ timeZone, updatedAt: now });
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -700,6 +956,9 @@ export default {
     if (request.method === "POST" && url.pathname === "/internal/v1/approvals/execution") {
       return recordApprovalExecution(request, env);
     }
+    if (request.method === "POST" && url.pathname === "/internal/v1/approvals/execution/reconcile") {
+      return reconcileApprovalExecution(request, env);
+    }
     if (request.method === "GET" && url.pathname === "/internal/v1/audit") {
       return listAudit(request, env);
     }
@@ -714,6 +973,25 @@ export default {
       url.pathname === "/internal/v1/settings/providers"
     ) {
       return providerSettings(request, env);
+    }
+    if ((request.method === "GET" || request.method === "PATCH") &&
+      url.pathname === "/internal/v1/settings/preferences") {
+      return ownerPreferences(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/discord/link-codes") {
+      return createDiscordLinkCode(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/discord/link-codes/consume") {
+      return consumeDiscordLinkCode(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/internal/v1/discord/link") {
+      return getDiscordLink(request, env, false);
+    }
+    if (request.method === "GET" && url.pathname === "/internal/v1/discord/resolve") {
+      return getDiscordLink(request, env, true);
+    }
+    if (request.method === "DELETE" && url.pathname === "/internal/v1/discord/link") {
+      return revokeDiscordLink(request, env);
     }
     return new Response("Not Found", {
       status: 404,

@@ -1,6 +1,6 @@
 {
   "name": "@opap/assistant-worker",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "@opap/approval": "workspace:*",
     "@opap/contracts": "workspace:*",
     "@opap/cost-control": "workspace:*",
+    "@opap/discord-connector": "workspace:*",
     "@opap/identity": "workspace:*",
     "@opap/security": "workspace:*",
     "@opap/owner-ui": "workspace:*",

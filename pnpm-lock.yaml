@@ -44,6 +44,9 @@ importers:
       '@opap/cost-control':
         specifier: workspace:*
         version: link:../../packages/cost-control
+      '@opap/discord-connector':
+        specifier: workspace:*
+        version: link:../../packages/discord-connector
       '@opap/identity':
         specifier: workspace:*
         version: link:../../packages/identity
@@ -111,6 +114,61 @@ importers:
       wrangler:
         specifier: ^4.54.0
         version: 4.119.0(@cloudflare/workers-types@4.20260702.1)
+
+  apps/delegated-source-gatekeeper:
+    dependencies:
+      '@opap/oauth-core':
+        specifier: workspace:*
+        version: link:../../packages/oauth-core
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20251202.0
+        version: 4.20260702.1
+      wrangler:
+        specifier: ^4.88.0
+        version: 4.119.0(@cloudflare/workers-types@4.20260702.1)
+
+  apps/discord-adapter:
+    dependencies:
+      '@opap/discord-connector':
+        specifier: workspace:*
+        version: link:../../packages/discord-connector
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20251202.0
+        version: 4.20260702.1
+      wrangler:
+        specifier: ^4.88.0
+        version: 4.119.0(@cloudflare/workers-types@4.20260702.1)
+
+  apps/discord-gatekeeper:
+    dependencies:
+      '@opap/approval':
+        specifier: workspace:*
+        version: link:../../packages/approval
+      '@opap/discord-connector':
+        specifier: workspace:*
+        version: link:../../packages/discord-connector
+      jose:
+        specifier: ^6.1.3
+        version: 6.2.8
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20251202.0
+        version: 4.20260702.1
+      wrangler:
+        specifier: ^4.88.0
+        version: 4.119.0(@cloudflare/workers-types@4.20260702.1)
+
+  apps/discord-gateway-bridge:
+    dependencies:
+      '@opap/discord-connector':
+        specifier: workspace:*
+        version: link:../../packages/discord-connector
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
 
   apps/github-gatekeeper:
     dependencies:
@@ -261,6 +319,8 @@ importers:
       '@opap/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  packages/discord-connector: {}
 
   packages/gatekeeper-sdk:
     dependencies:

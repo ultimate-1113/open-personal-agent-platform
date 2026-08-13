@@ -11,6 +11,10 @@ UIはConversation、Task、Structured Memory、Approval、Audit、Model Provider
 Message、Memory、Approval Content、Audit HistoryはBrowserへ永続保存しません。
 
 Task、Memory、Messageの書込はOwner Stateful Operation Quotaを予約してからConversation Durable Objectへ保存し、終了後に実績を精算します。
+Taskは一回、毎日、指定曜日、毎月のいずれかをIANAタイムゾーン付きで指定できます。
+チャット画面やDiscordを開いておく必要はありません。Conversation Durable Objectが最も近いTask用のAlarmを一つだけ保持し、予定時刻にAssistant Workerを呼び出します。
+Taskの要求と結果を永続的な文脈へ残すため、各TaskはConversationに属します。会話を始める前にTaskを作成した場合は、その文脈を自動的に作成します。
+実行時刻を逃した繰り返し分をまとめて再生せず、結果が不明または失敗した一回Taskも自動再試行しません。
 ApprovalはControl D1へ保存し、各判断をIdempotency Keyへ束縛します。
 Approvalの作成と判断は配置単位のAudit Ledgerへ同期追記します。
 

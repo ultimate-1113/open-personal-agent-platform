@@ -109,6 +109,24 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .connection-actions { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 18px; margin-bottom: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 15px; }
 .connection-actions p { margin: 5px 0 0; color: var(--text-muted); font-size: 13px; }
 .connection-actions button { color: var(--accent-text); background: var(--accent); border: 0; border-radius: 8px; padding: 10px 15px; font-weight: 700; white-space: nowrap; }
+.discord-connection { align-items: flex-start; }
+.discord-connection .actions { flex-wrap: wrap; justify-content: flex-end; }
+.button-link { display: inline-flex; align-items: center; min-height: 2.6rem; padding: 0 1rem; border-radius: 8px; background: var(--accent); color: var(--accent-text); text-decoration: none; }
+.link-code { display: grid; gap: 6px; margin-top: 16px; }
+.link-code code { overflow-wrap: anywhere; font-size: 1.05rem; }
+.link-code-value { display: flex; align-items: center; gap: 8px; }
+.link-code-value code { min-width: 0; }
+.link-code-value button { padding: 6px 10px; }
+.destination-list { display: grid; gap: 10px; margin-top: 16px; }
+.destination-list form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.task-schedule-fields { padding: 12px; border: 1px solid var(--border); border-radius: 9px; }
+.task-schedule-fields summary { cursor: pointer; color: var(--text-strong); font-weight: 700; }
+.task-schedule-fields[open] { display: grid; gap: 11px; }
+.task-schedule-fields label { display: grid; gap: 6px; color: var(--text-muted); font-size: 13px; }
+.task-schedule-fields select { color: var(--text-strong); background: var(--surface-muted); border: 1px solid var(--border-strong); border-radius: 8px; padding: 9px; }
+.task-schedule-fields fieldset { display: flex; flex-wrap: wrap; gap: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.task-schedule-fields .check { display: flex; align-items: center; }
+.task-schedule-fields .check input { width: auto; }
 
 @media (max-width: 760px) {
   .shell { display: block; }

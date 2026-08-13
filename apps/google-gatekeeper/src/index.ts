@@ -1,5 +1,6 @@
 import {
   OAUTH_PROVIDERS,
+  OAuthReconsentRequiredError,
   createAuthorizationStart,
   decryptCredential,
   encryptCredential,
@@ -133,13 +134,22 @@ const activeCredential = async (
   });
   const expiry = credential.expiresAt ? Date.parse(credential.expiresAt) : Number.POSITIVE_INFINITY;
   if (expiry <= Date.now() + 60_000) {
-    credential = await refreshAccessToken({
-      provider: OAUTH_PROVIDERS.google,
-      clientId: env.GOOGLE_CLIENT_ID,
-      clientSecret: env.GOOGLE_CLIENT_SECRET,
-      credential,
-      now: new Date(),
-    });
+    try {
+      credential = await refreshAccessToken({
+        provider: OAUTH_PROVIDERS.google,
+        clientId: env.GOOGLE_CLIENT_ID,
+        clientSecret: env.GOOGLE_CLIENT_SECRET,
+        credential,
+        now: new Date(),
+      });
+    } catch (error) {
+      if (!(error instanceof OAuthReconsentRequiredError)) throw error;
+      await env.GATEKEEPER_DB.prepare(
+        `UPDATE connections SET status = 'expired', updated_at = ?
+         WHERE deployment_id = ? AND connection_id = ? AND status = 'active'`,
+      ).bind(new Date().toISOString(), deploymentId, connectionId).run();
+      return undefined;
+    }
     const envelope = await encryptCredential({
       credential,
       kek: env.CREDENTIAL_KEK,

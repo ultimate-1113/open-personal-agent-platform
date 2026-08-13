@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.opap.discord-gateway-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/OWNER/open-personal-agent-platform/apps/discord-gateway-bridge/dist/index.js</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/OWNER/open-personal-agent-platform</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISCORD_ADAPTER_URL</key><string>https://opap-discord-staging.OWNER.workers.dev</string>
+    <key>DISCORD_BRIDGE_STATE_PATH</key><string>/Users/OWNER/.opap/discord-gateway-session.json</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/OWNER/Library/Logs/opap-discord-bridge.log</string>
+  <key>StandardErrorPath</key><string>/Users/OWNER/Library/Logs/opap-discord-bridge-error.log</string>
+</dict>
+</plist>

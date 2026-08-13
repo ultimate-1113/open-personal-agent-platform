@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-discord-gatekeeper",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEPLOYMENT_ID": "deployment:default",
+    "DISCORD_APPLICATION_ID": "1537317765558304838",
+    "EXECUTION_LEASE_PUBLIC_JWK": "{}"
+  },
+  "d1_databases": [{
+    "binding": "DISCORD_DB",
+    "database_name": "opap-discord-gatekeeper-dev",
+    "database_id": "local",
+    "migrations_dir": "../../migrations/discord-gatekeeper"
+  }]
+}

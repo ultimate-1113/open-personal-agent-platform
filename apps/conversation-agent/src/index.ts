@@ -1,4 +1,18 @@
 import { informationPolicySchema } from "@opap/contracts";
+import { isTaskSchedule, nextTaskRunAt, type TaskSchedule } from "./schedule.js";
+
+type TaskRunnerRpc = {
+  runScheduledTask(input: {
+    conversationId: string;
+    principalId: string;
+    taskId: string;
+    title: string;
+    description: string;
+    scheduledFor: string;
+  }): Promise<{ ok: boolean; errorCode?: string }>;
+};
+
+type Bindings = { TASK_RUNNER?: TaskRunnerRpc };
 
 type InitializeInput = {
   conversationId: string;
@@ -24,6 +38,8 @@ type CreateTaskInput = {
   idempotencyKey: string;
   title: string;
   description: string;
+  schedule: Exclude<TaskSchedule, { kind: "none" }>;
+  enabled?: boolean;
 };
 
 type CreateMemoryInput = {
@@ -37,9 +53,11 @@ type UpdateTaskInput = {
   principalId: string;
   idempotencyKey: string;
   taskId: string;
-  title: string;
-  description: string;
-  status: "pending" | "in-progress" | "completed";
+  title?: string;
+  description?: string;
+  status?: "pending" | "in-progress" | "completed";
+  schedule?: TaskSchedule;
+  enabled?: boolean;
 };
 
 type DeleteResourceInput = {
@@ -90,7 +108,9 @@ const isCreateTaskInput = (value: unknown): value is CreateTaskInput => {
     typeof input["title"] === "string" &&
     input["title"].length > 0 && input["title"].length <= 500 &&
     typeof input["description"] === "string" && input["description"].length > 0 &&
-    input["description"].length <= 32_768;
+    input["description"].length <= 32_768 &&
+    isTaskSchedule(input["schedule"]) && input["schedule"].kind !== "none" &&
+    (input["enabled"] === undefined || input["enabled"] === true);
 };
 
 const isCreateMemoryInput = (value: unknown): value is CreateMemoryInput => {
@@ -108,11 +128,15 @@ const isUpdateTaskInput = (value: unknown): value is UpdateTaskInput => {
   return typeof input["principalId"] === "string" &&
     typeof input["idempotencyKey"] === "string" &&
     typeof input["taskId"] === "string" && /^task:[0-9a-f-]{36}$/u.test(input["taskId"]) &&
-    typeof input["title"] === "string" && input["title"].length > 0 && input["title"].length <= 500 &&
-    typeof input["description"] === "string" && input["description"].length > 0 &&
-    input["description"].length <= 32_768 &&
-    (input["status"] === "pending" || input["status"] === "in-progress" ||
-      input["status"] === "completed");
+    (input["title"] === undefined || (typeof input["title"] === "string" &&
+      input["title"].length > 0 && input["title"].length <= 500)) &&
+    (input["description"] === undefined || (typeof input["description"] === "string" &&
+      input["description"].length > 0 && input["description"].length <= 32_768)) &&
+    (input["status"] === undefined || input["status"] === "pending" ||
+      input["status"] === "in-progress" || input["status"] === "completed") &&
+    (input["schedule"] === undefined || isTaskSchedule(input["schedule"])) &&
+    (input["enabled"] === undefined || typeof input["enabled"] === "boolean") &&
+    ["title", "description", "status", "schedule", "enabled"].some((key) => input[key] !== undefined);
 };
 
 const isDeleteResourceInput = (value: unknown): value is DeleteResourceInput => {
@@ -154,8 +178,12 @@ const isAppendAssistantInput = (value: unknown): value is AppendAssistantInput =
 
 export class ConversationAgent {
   readonly #sql: SqlStorage;
+  readonly #durableState: DurableObjectState;
+  readonly #env: Bindings;
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: Bindings) {
+    this.#durableState = state;
+    this.#env = env;
     this.#sql = state.storage.sql;
     this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS conversation (
@@ -215,6 +243,19 @@ export class ConversationAgent {
     const taskColumns = [...this.#sql.exec<{ name: string }>("PRAGMA table_info(tasks)")];
     if (!taskColumns.some((column) => column.name === "description")) {
       this.#sql.exec("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+    }
+    const additions = [
+      ["schedule_json", "TEXT NOT NULL DEFAULT '{\"kind\":\"none\"}'"],
+      ["enabled", "INTEGER NOT NULL DEFAULT 1"],
+      ["next_run_at", "TEXT"],
+      ["last_run_at", "TEXT"],
+      ["last_run_status", "TEXT"],
+      ["last_error_code", "TEXT"],
+    ] as const;
+    for (const [name, definition] of additions) {
+      if (!taskColumns.some((column) => column.name === name)) {
+        this.#sql.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
+      }
     }
   }
 
@@ -280,19 +321,19 @@ export class ConversationAgent {
     if (request.method === "POST" && path === "/tasks") {
       const value: unknown = await request.json().catch(() => null);
       return isCreateTaskInput(value)
-        ? this.#createTask(value)
+        ? await this.#createTask(value)
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
     if (request.method === "PATCH" && path.startsWith("/tasks/")) {
       const value: unknown = await request.json().catch(() => null);
       return isUpdateTaskInput(value)
-        ? this.#updateTask(value)
+        ? await this.#updateTask(value)
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
     if (request.method === "DELETE" && path.startsWith("/tasks/")) {
       const value: unknown = await request.json().catch(() => null);
       return isDeleteResourceInput(value)
-        ? this.#deleteTask(value)
+        ? await this.#deleteTask(value)
         : Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
     }
     if (request.method === "GET" && path === "/memories") return this.#memories();
@@ -415,26 +456,42 @@ export class ConversationAgent {
     });
   }
 
-  #createTask(input: CreateTaskInput): Response {
+  async #createTask(input: CreateTaskInput): Promise<Response> {
     const replay = this.#replay(`task:${input.idempotencyKey}`);
     if (replay) return Response.json(replay);
     const now = new Date().toISOString();
+    const schedule = input.schedule ?? { kind: "none" };
+    const enabled = input.enabled ?? true;
+    const nextRunAt = enabled ? nextTaskRunAt(schedule, new Date()) : undefined;
+    if (enabled && !nextRunAt) {
+      return Response.json({ code: "TASK_SCHEDULE_HAS_NO_FUTURE_RUN" }, { status: 400 });
+    }
     const task = {
       taskId: `task:${crypto.randomUUID()}`,
       title: input.title,
       description: input.description,
       status: "pending",
+      schedule,
+      enabled,
+      nextRunAt: nextRunAt ?? null,
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastErrorCode: null,
       callCounts: {},
       createdAt: now,
       updatedAt: now,
     };
     this.#sql.exec(
       `INSERT INTO tasks
-       (task_id, title, description, status, call_counts_json, policy_snapshot_json, created_at, updated_at)
-       VALUES (?, ?, ?, 'pending', '{}', '{}', ?, ?)`,
+       (task_id, title, description, status, call_counts_json, policy_snapshot_json,
+        schedule_json, enabled, next_run_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'pending', '{}', '{}', ?, ?, ?, ?, ?)`,
       task.taskId,
       task.title,
       task.description,
+      JSON.stringify(schedule),
+      enabled ? 1 : 0,
+      nextRunAt ?? null,
       now,
       now,
     );
@@ -444,6 +501,7 @@ export class ConversationAgent {
       principalId: input.principalId,
       taskId: task.taskId,
     }, now);
+    await this.#rescheduleAlarm();
     return Response.json(task, { status: 201 });
   }
 
@@ -555,10 +613,17 @@ export class ConversationAgent {
       description: string;
       status: string;
       call_counts_json: string;
+      schedule_json: string;
+      enabled: number;
+      next_run_at: string | null;
+      last_run_at: string | null;
+      last_run_status: string | null;
+      last_error_code: string | null;
       created_at: string;
       updated_at: string;
     }>(
-      `SELECT task_id, title, description, status, call_counts_json, created_at, updated_at
+      `SELECT task_id, title, description, status, call_counts_json, schedule_json, enabled,
+              next_run_at, last_run_at, last_run_status, last_error_code, created_at, updated_at
        FROM tasks ORDER BY created_at DESC LIMIT 100`,
     )].map((task) => ({
       taskId: task.task_id,
@@ -566,30 +631,60 @@ export class ConversationAgent {
       description: task.description,
       status: task.status,
       callCounts: JSON.parse(task.call_counts_json) as unknown,
+      schedule: JSON.parse(task.schedule_json) as unknown,
+      enabled: task.enabled === 1,
+      nextRunAt: task.next_run_at,
+      lastRunAt: task.last_run_at,
+      lastRunStatus: task.last_run_status,
+      lastErrorCode: task.last_error_code,
       createdAt: task.created_at,
       updatedAt: task.updated_at,
     }));
     return Response.json({ tasks });
   }
 
-  #updateTask(input: UpdateTaskInput): Response {
+  async #updateTask(input: UpdateTaskInput): Promise<Response> {
     const key = `task-update:${input.idempotencyKey}`;
     const replay = this.#replay(key);
     if (replay) return Response.json(replay);
-    const existing = firstRow(this.#sql.exec<{ created_at: string }>(
-      `SELECT created_at FROM tasks WHERE task_id = ?`, input.taskId,
+    const existing = firstRow(this.#sql.exec<{
+      title: string; description: string; status: "pending" | "in-progress" | "completed";
+      created_at: string; schedule_json: string; enabled: number;
+      last_run_at: string | null; last_run_status: string | null; last_error_code: string | null;
+    }>(
+      `SELECT title, description, status, created_at, schedule_json, enabled,
+        last_run_at, last_run_status, last_error_code
+       FROM tasks WHERE task_id = ?`, input.taskId,
     ));
     if (!existing) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
     const now = new Date().toISOString();
+    const schedule = input.schedule ?? JSON.parse(existing.schedule_json) as TaskSchedule;
+    const enabled = input.enabled ?? existing.enabled === 1;
+    const status = input.status ?? existing.status;
+    const nextRunAt = enabled && status !== "completed"
+      ? nextTaskRunAt(schedule, new Date()) : undefined;
+    if (schedule.kind !== "none" && enabled && status !== "completed" && !nextRunAt) {
+      return Response.json({ code: "TASK_SCHEDULE_HAS_NO_FUTURE_RUN" }, { status: 400 });
+    }
+    const title = input.title ?? existing.title;
+    const description = input.description ?? existing.description;
     this.#sql.exec(
-      `UPDATE tasks SET title = ?, description = ?, status = ?, updated_at = ? WHERE task_id = ?`,
-      input.title, input.description, input.status, now, input.taskId,
+      `UPDATE tasks SET title = ?, description = ?, status = ?, schedule_json = ?, enabled = ?,
+       next_run_at = ?, updated_at = ? WHERE task_id = ?`,
+      title, description, status, JSON.stringify(schedule), enabled ? 1 : 0,
+      nextRunAt ?? null, now, input.taskId,
     );
     const task = {
       taskId: input.taskId,
-      title: input.title,
-      description: input.description,
-      status: input.status,
+      title,
+      description,
+      status,
+      schedule,
+      enabled,
+      nextRunAt: nextRunAt ?? null,
+      lastRunAt: existing.last_run_at,
+      lastRunStatus: existing.last_run_status,
+      lastErrorCode: existing.last_error_code,
       callCounts: {},
       createdAt: existing.created_at,
       updatedAt: now,
@@ -598,21 +693,23 @@ export class ConversationAgent {
       eventType: "task.updated", outcome: "success",
       principalId: input.principalId, taskId: input.taskId,
     }, now);
+    await this.#rescheduleAlarm();
     return Response.json(task);
   }
 
-  #deleteTask(input: DeleteResourceInput): Response {
+  async #deleteTask(input: DeleteResourceInput): Promise<Response> {
     const key = `task-delete:${input.idempotencyKey}`;
     const replay = this.#replay(key);
     if (replay) return Response.json(replay);
     const deleted = this.#sql.exec(`DELETE FROM tasks WHERE task_id = ?`, input.resourceId);
-    if (deleted.rowsWritten !== 1) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
+    if (deleted.rowsWritten === 0) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
     const now = new Date().toISOString();
     const response = { taskId: input.resourceId, deleted: true };
     this.#recordWrite(key, response, {
       eventType: "task.deleted", outcome: "success",
       principalId: input.principalId, taskId: input.resourceId,
     }, now);
+    await this.#rescheduleAlarm();
     return Response.json(response);
   }
 
@@ -693,6 +790,83 @@ export class ConversationAgent {
       principalId: input.principalId, memoryKey: input.resourceId,
     }, now);
     return Response.json(response);
+  }
+
+  async alarm(): Promise<void> {
+    const now = new Date();
+    const conversation = firstRow(this.#sql.exec<ConversationRow>(
+      "SELECT conversation_id, principal_id, created_at, updated_at FROM conversation LIMIT 1",
+    ));
+    if (!conversation) {
+      await this.#rescheduleAlarm();
+      return;
+    }
+    const due = [...this.#sql.exec<{
+      task_id: string;
+      title: string;
+      description: string;
+      schedule_json: string;
+      next_run_at: string;
+    }>(`SELECT task_id, title, description, schedule_json, next_run_at
+        FROM tasks
+        WHERE enabled = 1 AND status <> 'completed' AND next_run_at IS NOT NULL AND next_run_at <= ?
+        ORDER BY next_run_at LIMIT 20`, now.toISOString())];
+
+    for (const task of due) {
+      const schedule = JSON.parse(task.schedule_json) as TaskSchedule;
+      let outcome: { ok: boolean; errorCode?: string };
+      try {
+        outcome = this.#env.TASK_RUNNER
+          ? await this.#env.TASK_RUNNER.runScheduledTask({
+              conversationId: conversation.conversation_id,
+              principalId: conversation.principal_id,
+              taskId: task.task_id,
+              title: task.title,
+              description: task.description,
+              scheduledFor: task.next_run_at,
+            })
+          : { ok: false, errorCode: "TASK_RUNNER_UNAVAILABLE" };
+      } catch {
+        outcome = { ok: false, errorCode: "TASK_RUNNER_UNAVAILABLE" };
+      }
+      const recurring = schedule.kind === "daily" || schedule.kind === "weekly" ||
+        schedule.kind === "monthly";
+      const nextRunAt = recurring ? nextTaskRunAt(schedule, now) : undefined;
+      const status = !recurring && outcome.ok ? "completed" : "pending";
+      this.#sql.exec(
+        `UPDATE tasks SET status = ?, enabled = ?, next_run_at = ?, last_run_at = ?,
+         last_run_status = ?, last_error_code = ?, updated_at = ? WHERE task_id = ?`,
+        status,
+        recurring ? 1 : 0,
+        nextRunAt ?? null,
+        now.toISOString(),
+        outcome.ok ? "succeeded" : "failed",
+        outcome.errorCode ?? null,
+        now.toISOString(),
+        task.task_id,
+      );
+      this.#sql.exec(
+        "INSERT INTO audit_outbox (event_json, created_at) VALUES (?, ?)",
+        JSON.stringify({ eventType: "task.executed", outcome: outcome.ok ? "success" : "failure",
+          principalId: conversation.principal_id, taskId: task.task_id,
+          scheduledFor: task.next_run_at, errorCode: outcome.errorCode }),
+        now.toISOString(),
+      );
+    }
+    await this.#rescheduleAlarm();
+  }
+
+  async #rescheduleAlarm(): Promise<void> {
+    const next = firstRow(this.#sql.exec<{ next_run_at: string }>(
+      `SELECT next_run_at FROM tasks
+       WHERE enabled = 1 AND status <> 'completed' AND next_run_at IS NOT NULL
+       ORDER BY next_run_at LIMIT 1`,
+    ));
+    if (next) {
+      await this.#durableState.storage.setAlarm(Math.max(Date.now(), Date.parse(next.next_run_at)));
+    } else {
+      await this.#durableState.storage.deleteAlarm();
+    }
   }
 
   #replay(idempotencyKey: string): Readonly<Record<string, unknown>> | undefined {

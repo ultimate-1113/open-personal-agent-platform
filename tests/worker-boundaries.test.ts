@@ -79,6 +79,49 @@ describe("Worker binding boundaries", () => {
     expect(services.map((service) => service.binding)).toEqual(["CONTROL"]);
   });
 
+  it("keeps delegated source credentials in a separate private read-only gatekeeper", async () => {
+    const config = await readConfig("delegated-source-gatekeeper");
+    expect(config.workers_dev).toBe(false);
+    expect(config).not.toHaveProperty("routes");
+    expect(config).not.toHaveProperty("ai");
+    expect(config).not.toHaveProperty("services");
+    const databases = config.d1_databases as { binding: string }[];
+    expect(databases.map((database) => database.binding)).toEqual(["SOURCE_DB"]);
+
+    const source = await readFile(resolve("apps", "delegated-source-gatekeeper", "src", "index.ts"), "utf8");
+    expect(source).not.toMatch(/gmail|calendar|createGitHubIssue|createGitHubIssueComment/iu);
+    expect(source).toMatch(/RESOURCE_SCOPE_DENIED/u);
+    expect(source).toMatch(/resourceIds\.includes/u);
+  });
+
+  it("keeps Discord public ingress isolated from private platform state", async () => {
+    const config = await readConfig("discord-adapter");
+    expect(config).not.toHaveProperty("d1_databases");
+    expect(config).not.toHaveProperty("ai");
+    expect(config).not.toHaveProperty("r2_buckets");
+    const services = config.services as { binding: string; entrypoint?: string }[];
+    expect(services).toEqual([
+      { binding: "ASSISTANT", service: "opap-assistant", entrypoint: "DiscordEntrypoint" },
+      { binding: "DISCORD_GATEKEEPER", service: "opap-discord-gatekeeper" },
+    ]);
+    const durableObjects = config.durable_objects as { bindings: { name: string }[] };
+    expect(durableObjects.bindings.map((binding) => binding.name)).toEqual(["DISCORD_DEDUPE"]);
+  });
+
+  it("keeps the Discord Gatekeeper and Bot Token off public routes", async () => {
+    const config = await readConfig("discord-gatekeeper");
+    expect(config.workers_dev).toBe(false);
+    expect(config).not.toHaveProperty("routes");
+    expect(JSON.stringify(config)).not.toContain("DISCORD_BOT_TOKEN");
+  });
+
+  it("stores only low-frequency Discord link state in Control D1", async () => {
+    const migration = await readFile(resolve("migrations", "control", "0004_discord_links.sql"), "utf8");
+    expect(migration).toMatch(/code_digest/u);
+    expect(migration).not.toMatch(/interaction_token|bot_token|message_content/iu);
+    expect(migration).toMatch(/UNIQUE \(deployment_id, discord_user_id\)/u);
+  });
+
   it("keeps high-volume observations and audit events out of D1", async () => {
     const migration = await readFile(
       resolve("migrations", "control", "0001_initial.sql"),

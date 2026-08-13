@@ -11,6 +11,10 @@ Only the selected conversation ID, locale, and theme are stored in browser local
 Messages, memory, approval content, and audit history are not persisted in the browser.
 
 Task, memory, and message writes reserve Owner Stateful Operation quota before committing to the Conversation Durable Object and settle actual usage afterward.
+Tasks can run once, daily, on selected weekdays, or monthly in an IANA time zone.
+The conversation page and Discord do not need to remain open: the Conversation Durable Object keeps one alarm for its nearest task and invokes the Assistant Worker when it becomes due.
+Each task still belongs to a conversation so its request and result have a durable context; creating a task before starting a chat creates that context silently.
+Missed recurring occurrences are not replayed in a burst, and a one-time task is not retried automatically after an uncertain or failed execution.
 Approvals are stored in Control D1, and each decision is bound to an idempotency key.
 Approval creation and decisions synchronously append to the deployment Audit Ledger.
 

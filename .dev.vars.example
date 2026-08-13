@@ -1,0 +1,5 @@
+# Local secret input. Copy this file to .dev.vars and never commit the populated file.
+DISCORD_BOT_TOKEN=
+
+# Optional experimental Gateway Bridge secret.
+DISCORD_BRIDGE_SIGNING_KEY=

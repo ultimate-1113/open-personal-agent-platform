@@ -8,8 +8,8 @@ Open Personal Agent Platformは、Cloudflareを常時稼働する制御基盤と
 外部サイトの利用者はDelegated Principalとして分離され、Ownerの個人秘書を共同利用しません。
 
 > [!WARNING]
-> 現在のリリースは`v0.1.0-alpha`です。
-> Phase 2の縦断機能をstagingで検証した段階であり、本番SLAと長期API互換性は提供していません。
+> 現在のリリースは`v0.1.0-alpha.1`です。
+> Phase 3のConnector実装をstagingで段階的に検証している段階であり、本番SLAと長期API互換性は提供していません。
 
 ## 現在利用できる機能
 
@@ -25,15 +25,17 @@ Open Personal Agent Platformは、Cloudflareを常時稼働する制御基盤と
 - Public WorkerからPrivate Bindingを排除するCI契約試験
 - Cloudflare契約や実資格情報を必要としないContributor CI
 - 日本語と英語のUI、設定を保持するライトテーマとダークテーマ
+- Gmail、Calendar、Driveを扱うGoogle Personal Connector
+- Repository読取、承認付きIssue作成、承認付きComment投稿を行うGitHub App Connector
+- DiscordのSlash Command、Owner Link、Task Scheduling、Approval、通知、実験的DM Gateway Bridge
+- CredentialとResource Allowlistを分離した読取専用Delegated Source Gatekeeper
 
 Ownerは招待や他者の承認なしで初回設定を開始します。
 Delegated Principalは明示的に公開されたSourceだけを読み取れます。
 
 ## 未実装の機能
 
-Google Personal Connectorは利用可能です。
-GitHub Personal Connectorは実装済みで、staging用GitHub Appの設定を進めています。
-Discord Connector、公開Knowledge API、MCP、生成SDK、動的Sandbox Pluginは後続Phaseで実装します。
+公開Knowledge API、Delegated SourceのQuery接続、MCP、生成SDK、動的Sandbox Pluginは後続Phaseで実装します。
 GitHubコード変更、決済、複数Owner、複数Tenantはv0.1の対象外です。
 Gmail送信は、正確な内容をOwnerが承認した場合に限り利用できます。
 

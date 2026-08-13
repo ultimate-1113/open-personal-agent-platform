@@ -1,0 +1,22 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-discord",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DEPLOYMENT_ID": "deployment:default",
+    "DISCORD_APPLICATION_ID": "1537317765558304838",
+    "DISCORD_PUBLIC_KEY": "776cd97855a80999f08692fb0b2f7bdb52f54a170823e681e88530baa815e70f"
+  },
+  "services": [
+    { "binding": "ASSISTANT", "service": "opap-assistant", "entrypoint": "DiscordEntrypoint" },
+    { "binding": "DISCORD_GATEKEEPER", "service": "opap-discord-gatekeeper" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "DISCORD_DEDUPE", "class_name": "DiscordDedupe" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DiscordDedupe"] }]
+}

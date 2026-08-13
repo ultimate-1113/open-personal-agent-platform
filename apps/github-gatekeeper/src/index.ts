@@ -14,6 +14,7 @@ import {
 } from "@opap/github-connector";
 import {
   OAUTH_PROVIDERS,
+  OAuthReconsentRequiredError,
   OAuthProviderError,
   createAuthorizationStart,
   decryptCredential,
@@ -96,13 +97,22 @@ const activeCredential = async (env: Bindings, deploymentId: string, connectionI
   });
   const expiry = credential.expiresAt ? Date.parse(credential.expiresAt) : Number.POSITIVE_INFINITY;
   if (expiry <= Date.now() + 60_000) {
-    credential = await refreshAccessToken({
-      provider: OAUTH_PROVIDERS.github,
-      clientId: env.GITHUB_CLIENT_ID,
-      clientSecret: env.GITHUB_CLIENT_SECRET,
-      credential,
-      now: new Date(),
-    });
+    try {
+      credential = await refreshAccessToken({
+        provider: OAUTH_PROVIDERS.github,
+        clientId: env.GITHUB_CLIENT_ID,
+        clientSecret: env.GITHUB_CLIENT_SECRET,
+        credential,
+        now: new Date(),
+      });
+    } catch (error) {
+      if (!(error instanceof OAuthReconsentRequiredError)) throw error;
+      await env.GATEKEEPER_DB.prepare(
+        `UPDATE connections SET status = 'expired', updated_at = ?
+         WHERE deployment_id = ? AND connection_id = ? AND status = 'active'`,
+      ).bind(new Date().toISOString(), deploymentId, connectionId).run();
+      return undefined;
+    }
     const envelope = await encryptCredential({
       credential, kek: env.CREDENTIAL_KEK, keyId: env.CREDENTIAL_KEY_ID,
       deploymentId, connectionId,

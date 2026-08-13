@@ -9,11 +9,13 @@
     "ENVIRONMENT": "development",
     "DEPLOYMENT_ID": "deployment:default",
     "OWNER_EMAIL": "owner@example.invalid",
+    "OWNER_TIME_ZONE": "Asia/Tokyo",
     "ACCESS_ISSUER": "https://example.cloudflareaccess.com",
     "ACCESS_AUDIENCE": "configure-me",
     "ACCESS_JWKS_URI": "https://example.cloudflareaccess.com/cdn-cgi/access/certs",
     "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
-    "AI_GATEWAY_ID": "default"
+    "AI_GATEWAY_ID": "default",
+    "DISCORD_APPLICATION_ID": "1537317765558304838"
   },
   "ai": {
     "binding": "AI"
@@ -30,6 +32,10 @@
     {
       "binding": "GITHUB_GATEKEEPER",
       "service": "opap-github-gatekeeper"
+    },
+    {
+      "binding": "DISCORD_GATEKEEPER",
+      "service": "opap-discord-gatekeeper"
     }
   ],
   "durable_objects": {

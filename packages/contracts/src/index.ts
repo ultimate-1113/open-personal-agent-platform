@@ -1,5 +1,27 @@
 import { z } from "zod";
 
+export const normalizeTimeZone = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 100) return undefined;
+  if (/^(?:UTC|GMT)$/iu.test(trimmed)) return "UTC";
+  const offset = /^(?:(?:UTC|GMT)\s*)?([+-])(\d{1,2})(?::?(\d{2}))?$/iu.exec(trimmed);
+  let normalized = trimmed;
+  if (offset) {
+    const hours = Number(offset[2]);
+    const minutes = Number(offset[3] ?? "0");
+    if (hours > 23 || minutes > 59) return undefined;
+    if (hours === 0 && minutes === 0) return "UTC";
+    normalized = `${offset[1]}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: normalized }).format(new Date(0));
+    return normalized;
+  } catch {
+    return undefined;
+  }
+};
+
 export const ISO_DATE_TIME = z.iso.datetime({ offset: true });
 export const identifierSchema = z
   .string()

@@ -8,8 +8,8 @@ Each deployment belongs to one owner.
 External users are isolated as delegated API principals and never become co-users of the owner's personal assistant.
 
 > [!WARNING]
-> The current release is `v0.1.0-alpha`.
-> It contains the Phase 2 vertical slice validated in staging, without a production SLA or long-term API compatibility guarantee.
+> The current release is `v0.1.0-alpha.1`.
+> It contains the Phase 3 connector implementation validated incrementally in staging, without a production SLA or long-term API compatibility guarantee.
 
 ## Available now
 
@@ -25,15 +25,17 @@ External users are isolated as delegated API principals and never become co-user
 - CI contract tests that prevent private bindings on the Public Worker
 - Contributor CI that requires neither a Cloudflare account nor real credentials
 - Japanese and English UI, with persistent light and dark themes
+- Google Personal Connector for Gmail, Calendar, and Drive
+- GitHub App connector for repository reads, approved Issue creation, and approved comments
+- Discord slash commands, owner linking, task scheduling, approvals, notifications, and an experimental DM Gateway Bridge
+- Separate read-only Delegated Source Gatekeeper credentials and resource allowlists
 
 The owner starts setup without an invitation or approval from another person.
 Delegated principals may only read sources explicitly published to them.
 
 ## Not implemented yet
 
-The Google Personal Connector is available.
-The GitHub Personal Connector is implemented and awaiting staging GitHub App configuration.
-Discord, the public Knowledge API, MCP, the generated SDK, and dynamic Sandbox plugins remain in later phases.
+The public Knowledge API, Delegated Source query wiring, MCP, the generated SDK, and dynamic Sandbox plugins remain in later phases.
 GitHub code changes, payments, multiple owners, and multi-tenancy are outside the v0.1 scope.
 Gmail sending is available only through an exact-content owner approval.
 

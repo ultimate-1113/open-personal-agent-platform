@@ -14,13 +14,28 @@ See [Google and GitHub provider setup](connector-provider-setup.md) for external
 5. Discord one-time owner linking, conversation replies, and approval notifications
 6. Reconciliation UI for external writes with an `unknown` result
 
-The shared OAuth foundation, Google Personal Gatekeeper, and GitHub Personal Gatekeeper are implemented.
+The shared OAuth foundation, Google Personal Gatekeeper, GitHub Personal Gatekeeper, and the physically separate Delegated Source Gatekeeper are implemented.
 Gmail messages are sent only after the owner approves the exact recipient, subject, and body.
 Recipient addresses are not restricted by a deployment allowlist.
 GitHub reads repositories, code, subscribed issues, pull requests, and issue or pull-request comments.
 Creating an issue or posting a comment runs only after owner approval.
 GitHub code changes and pull-request creation are not implemented.
-Discord and Delegated Source Gatekeepers remain in progress.
+Discord HTTP Interactions, owner linking, commands, notification destinations, and the experimental Gateway Bridge are implemented.
+See [Discord Connector](discord-connector.md) for deployment instructions.
+The Delegated Source Gatekeeper has its own D1 database, OAuth credentials, read-only endpoints, and explicit Drive file/folder or GitHub repository allowlists.
+It cannot call Gmail, Calendar, or write capabilities.
+Phase 4 connects this internal contract to Source ACL evaluation and the Delegated Knowledge API.
+External writes that end in `unknown` can be reconciled by the owner as executed or not executed without automatically retrying the external operation.
+
+## Delegated Source deployment boundary
+
+Deploy `apps/delegated-source-gatekeeper` with its own D1 database and its own `CREDENTIAL_KEK`.
+Set `GOOGLE_CLIENT_SECRET` and `GITHUB_CLIENT_SECRET` as Worker Secrets, not regular variables.
+The Google OAuth client and GitHub App installation must be separate from the Personal Gatekeepers.
+An OAuth start request must contain at least one Drive file/folder ID or `owner/repository` identifier.
+Folder document reads verify the returned Google Drive parent ID before returning at most 1 MiB of supported text content.
+Do not bind this Worker to the Assistant Worker or Public Agent API.
+Phase 4 binds it only to the Delegated API through a named internal service binding.
 
 ## GitHub App staging configuration
 
@@ -55,6 +70,7 @@ Automatic webhook ingestion will be enabled only after adding a dedicated public
 - GitHub Apps request no OAuth scopes; App permissions and installation selection constrain access.
 - A refresh rejection marks the connection for reconsent and never falls back to broader credentials.
 - Personal and Delegated Source connections use different credentials, scopes, databases, and entrypoints.
+- Run `pnpm verify:execution-lease-keys` before deployment to reject mismatched Gatekeeper verification keys.
 
 Provider registration and real-credential tests run only in a manual staging workflow.
 Contributor CI uses fake OAuth and API servers.

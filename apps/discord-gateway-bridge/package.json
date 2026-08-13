@@ -1,0 +1,17 @@
+{
+  "name": "@opap/discord-gateway-bridge",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opap/discord-connector": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1"
+  },
+  "scripts": {
+    "start": "node --enable-source-maps dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

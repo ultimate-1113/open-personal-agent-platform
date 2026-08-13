@@ -5,6 +5,9 @@
   "compatibility_date": "2026-08-07",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
+  "services": [
+    { "binding": "TASK_RUNNER", "service": "opap-assistant", "entrypoint": "ScheduledTaskEntrypoint" }
+  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ConversationAgent"] }
   ]

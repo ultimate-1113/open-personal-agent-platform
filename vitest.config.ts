@@ -1,8 +1,14 @@
 import { defineConfig } from "vitest/config";
+import { resolve } from "node:path";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "cloudflare:workers": resolve("tests/cloudflare-workers-shim.ts"),
+    },
+  },
   test: {
-    include: ["packages/**/*.test.ts", "tests/**/*.test.ts"],
+    include: ["apps/**/*.test.ts", "packages/**/*.test.ts", "tests/**/*.test.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],
