@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Discord Ed25519 interaction verification public key"
+targetRules = ["discord-api-token"]
+regexTarget = "secret"
+regexes = [
+  '''^776cd97855a80999f08692fb0b2f7bdb52f54a170823e681e88530baa815e70f$''',
+]
