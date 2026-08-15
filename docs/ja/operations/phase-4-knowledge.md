@@ -71,7 +71,7 @@ Delegated MCPはRESTと同じJWT、ACL、Quota、Cache、Application Serviceを�
 実資格情報の受入試験では、`.dev.vars`へ`DELEGATED_TEST_JWT`を設定してから次を実行します。
 
 ```powershell
-node --experimental-strip-types scripts/test-delegated-staging.ts `
+node --experimental-transform-types scripts/test-delegated-staging.ts `
   --source-id source:delegated-drive-test `
   --query "OPAP delegated Drive staging verification" `
   --answer true

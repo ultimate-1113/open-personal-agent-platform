@@ -71,7 +71,7 @@ Delegated MCP uses the same JWT, ACL, quota, cache, and application service as R
 For a real-credential acceptance test, set `DELEGATED_TEST_JWT` in `.dev.vars` and run:
 
 ```powershell
-node --experimental-strip-types scripts/test-delegated-staging.ts `
+node --experimental-transform-types scripts/test-delegated-staging.ts `
   --source-id source:delegated-drive-test `
   --query "OPAP delegated Drive staging verification" `
   --answer true

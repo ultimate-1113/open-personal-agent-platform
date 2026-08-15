@@ -1,7 +1,7 @@
 // Runs the real delegated REST, SDK, MCP, authorization, and optional answer acceptance checks.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createDelegatedClient } from "../packages/sdk/dist/index.js";
+import { createDelegatedClient } from "../packages/sdk/src/index.ts";
 
 type JsonRecord = Record<string, unknown>;
 const record = (value: unknown): JsonRecord | undefined =>
