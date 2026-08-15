@@ -8,8 +8,8 @@ Each deployment belongs to one owner.
 External users are isolated as delegated API principals and never become co-users of the owner's personal assistant.
 
 > [!WARNING]
-> The current release is `v0.1.0-alpha.1`.
-> It contains the Phase 3 connector implementation validated incrementally in staging, without a production SLA or long-term API compatibility guarantee.
+> The current release is `v0.1.0-alpha.2`.
+> It contains the Phase 4 Knowledge API implementation, without a production SLA or long-term API compatibility guarantee.
 
 ## Available now
 
@@ -29,13 +29,17 @@ External users are isolated as delegated API principals and never become co-user
 - GitHub App connector for repository reads, approved Issue creation, and approved comments
 - Discord slash commands, owner linking, task scheduling, approvals, notifications, and an experimental DM Gateway Bridge
 - Separate read-only Delegated Source Gatekeeper credentials and resource allowlists
+- Public and delegated `POST /v1/query` APIs with model-free search and cited answers
+- Fixture, static-index, AI Search, Google Drive, and GitHub knowledge adapters
+- OpenAPI 3.1 documents, the typed `@opap/sdk`, and stateless Streamable HTTP MCP
+- An actual `okidev-web` AI Search binding, plus a staging-only public-endpoint compatibility transport
 
 The owner starts setup without an invitation or approval from another person.
 Delegated principals may only read sources explicitly published to them.
 
 ## Not implemented yet
 
-The public Knowledge API, Delegated Source query wiring, MCP, the generated SDK, and dynamic Sandbox plugins remain in later phases.
+Dynamic Sandbox plugins and the production deployment profiles remain in Phase 5.
 GitHub code changes, payments, multiple owners, and multi-tenancy are outside the v0.1 scope.
 Gmail sending is available only through an exact-content owner approval.
 
@@ -98,6 +102,7 @@ See [resource budgets](docs/en/operations/resource-budgets.md).
 - [Identity configuration](docs/en/operations/identity-configuration.md)
 - [Owner surface](docs/en/operations/owner-surface.md)
 - [Phase 3 connectors](docs/en/operations/phase-3-connectors.md)
+- [Phase 4 knowledge APIs](docs/en/operations/phase-4-knowledge.md)
 - [Google and GitHub provider setup](docs/en/operations/connector-provider-setup.md)
 - [Localization](docs/en/contributing/localization.md)
 

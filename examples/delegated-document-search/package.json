@@ -1,0 +1,9 @@
+{
+  "name": "@opap/example-delegated-document-search",
+  "version": "0.1.0-alpha.2",
+  "private": true,
+  "type": "module",
+  "scripts": { "typecheck": "tsc --noEmit", "build": "tsc --noEmit" },
+  "dependencies": { "@opap/sdk": "workspace:*" },
+  "devDependencies": { "@types/node": "^24.10.1", "typescript": "^5.9.3" }
+}

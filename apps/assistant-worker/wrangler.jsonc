@@ -36,6 +36,11 @@
     {
       "binding": "DISCORD_GATEKEEPER",
       "service": "opap-discord-gatekeeper"
+    },
+    {
+      "binding": "DELEGATED_SOURCE_ADMIN",
+      "service": "opap-delegated-source-gatekeeper",
+      "entrypoint": "DelegatedSourceAdminEntrypoint"
     }
   ],
   "durable_objects": {

@@ -22,6 +22,12 @@ describe("Worker binding boundaries", () => {
     expect(config.ratelimits).toEqual([
       expect.objectContaining({ name: "PUBLIC_RATE_LIMITER" }),
     ]);
+    expect(config.ai).toEqual({ binding: "AI" });
+    expect(config.ai_search).toEqual([
+      { binding: "AI_SEARCH", instance_name: "okidev-web", remote: true },
+    ]);
+    expect(String((config.vars as Record<string, unknown>)["PUBLIC_SOURCES_JSON"]))
+      .not.toContain("public-endpoint");
     expect(config.workers_dev).toBe(false);
     const durableObjects = config.durable_objects as {
       bindings: { name: string; class_name: string; script_name?: string }[];
@@ -76,7 +82,11 @@ describe("Worker binding boundaries", () => {
   it("does not bind personal gatekeepers to the delegated API", async () => {
     const config = await readConfig("delegated-agent-api");
     const services = config.services as { binding: string }[];
-    expect(services.map((service) => service.binding)).toEqual(["CONTROL"]);
+    expect(services).toEqual([
+      { binding: "CONTROL", service: "opap-policy-control" },
+      { binding: "DELEGATED_SOURCE_READ", service: "opap-delegated-source-gatekeeper",
+        entrypoint: "DelegatedSourceReadEntrypoint" },
+    ]);
   });
 
   it("keeps delegated source credentials in a separate private read-only gatekeeper", async () => {

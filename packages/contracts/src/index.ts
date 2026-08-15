@@ -257,6 +257,54 @@ export const delegatedSourceAclSchema = z.object({
 export type DelegatedSourceAcl = z.infer<typeof delegatedSourceAclSchema>;
 export type DelegatedAclRule = DelegatedSourceAcl["rules"][number];
 
+export const knowledgeSourceKindSchema = z.enum([
+  "fixture",
+  "static-site",
+  "ai-search",
+  "google-drive",
+  "github",
+]);
+
+export type KnowledgeSourceKind = z.infer<typeof knowledgeSourceKindSchema>;
+
+export const knowledgeCachePolicySchema = z.object({
+  enabled: z.boolean().default(false),
+  ttlSeconds: z.number().int().min(1).max(60).default(60),
+});
+
+export type KnowledgeCachePolicy = z.infer<typeof knowledgeCachePolicySchema>;
+
+export const knowledgeRetrievalPolicySchema = z.object({
+  retrievalType: z.enum(["keyword", "vector", "hybrid"]).default("keyword"),
+  candidateResults: z.number().int().min(1).max(50).default(10),
+  matchThreshold: z.number().min(0).max(1).default(0.4),
+  contextExpansion: z.number().int().min(0).max(3).default(0),
+  answerContextCharacters: z.number().int().min(1_000).max(32_768).default(4_000),
+  answerMaxOutputTokens: z.number().int().min(128).max(4_096).default(1_024),
+  answerReasoningEffort: z.enum(["low", "medium", "high"]).default("low"),
+});
+
+export type KnowledgeRetrievalPolicy = z.infer<typeof knowledgeRetrievalPolicySchema>;
+
+export const delegatedSourceDefinitionSchema = z.object({
+  sourceId: identifierSchema,
+  sourceType: z.enum(["google-drive", "github"]),
+  connectionId: identifierSchema,
+  resourceIds: z.array(z.string().min(1).max(2_000)).min(1).max(100),
+  acl: delegatedSourceAclSchema,
+  informationPolicy: informationPolicySchema,
+  cachePolicy: knowledgeCachePolicySchema.default({ enabled: false, ttlSeconds: 60 }),
+  retrievalPolicy: knowledgeRetrievalPolicySchema.default({
+    retrievalType: "keyword", candidateResults: 10, matchThreshold: 0.4,
+    contextExpansion: 0, answerContextCharacters: 4_000, answerMaxOutputTokens: 1_024,
+    answerReasoningEffort: "low",
+  }),
+  sourceVersion: z.number().int().positive().default(1),
+  enabled: z.boolean().default(true),
+});
+
+export type DelegatedSourceDefinition = z.infer<typeof delegatedSourceDefinitionSchema>;
+
 export const pluginManifestSchema = z.object({
   apiVersion: z.literal("opap.dev/v1alpha1"),
   kind: z.literal("Plugin"),
@@ -311,11 +359,33 @@ export const searchResultSchema = z.object({
   title: z.string().min(1),
   uri: z.string().url(),
   observedAt: ISO_DATE_TIME,
-  excerpt: z.string(),
+  excerpt: z.string().max(2_048),
   observationId: identifierSchema,
 });
 
 export type SearchResult = z.infer<typeof searchResultSchema>;
+
+export const searchQueryResponseSchema = z.object({
+  mode: z.literal("search"),
+  results: z.array(searchResultSchema).max(20),
+});
+
+export const answerQueryResponseSchema = z.object({
+  mode: z.literal("answer"),
+  answer: z.string(),
+  citations: z.array(searchResultSchema).max(20),
+  observationId: identifierSchema,
+  model: z.object({ providerId: identifierSchema }),
+});
+
+export const queryResponseSchema = z.discriminatedUnion("mode", [
+  searchQueryResponseSchema,
+  answerQueryResponseSchema,
+]);
+
+export type SearchQueryResponse = z.infer<typeof searchQueryResponseSchema>;
+export type AnswerQueryResponse = z.infer<typeof answerQueryResponseSchema>;
+export type QueryResponse = z.infer<typeof queryResponseSchema>;
 
 export const meteredResourceSchema = z.enum([
   "worker-request",

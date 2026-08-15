@@ -4,7 +4,9 @@ import { importJWK, type JWK } from "jose";
 import {
   DEFAULT_OWNER_MODEL_SETTINGS,
   cloudCostPolicySchema,
+  delegatedSourceDefinitionSchema,
   delegatedSourceAclSchema,
+  informationPolicySchema,
   modelProviderSettingSchema,
   normalizeTimeZone,
   ownerModelSettingsSchema,
@@ -38,6 +40,11 @@ type DelegatedSourceRow = {
   source_type: string;
   resource_ids_json: string;
   acl_json: string;
+  connection_id: string;
+  source_version: number;
+  information_policy_json: string;
+  cache_enabled: number;
+  cache_ttl_seconds: number;
 };
 
 type ApprovalRow = {
@@ -201,7 +208,8 @@ async function authorizeDelegatedSource(
     return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
   }
   const source = await database.prepare(
-    `SELECT source_id, source_type, resource_ids_json, acl_json
+    `SELECT source_id, source_type, resource_ids_json, acl_json, connection_id,
+            source_version, information_policy_json, cache_enabled, cache_ttl_seconds
      FROM delegated_sources
      WHERE deployment_id = ? AND source_id = ? AND enabled = 1`,
   ).bind(input["deploymentId"], input["sourceId"]).first<DelegatedSourceRow>();
@@ -210,15 +218,19 @@ async function authorizeDelegatedSource(
   }
   let aclValue: unknown;
   let resourceValue: unknown;
+  let informationPolicyValue: unknown;
   try {
     aclValue = JSON.parse(source.acl_json) as unknown;
     resourceValue = JSON.parse(source.resource_ids_json) as unknown;
+    informationPolicyValue = JSON.parse(source.information_policy_json) as unknown;
   } catch {
     return Response.json({ code: "SOURCE_CONFIGURATION_INVALID" }, { status: 503 });
   }
   const acl = delegatedSourceAclSchema.safeParse(aclValue);
+  const informationPolicy = informationPolicySchema.safeParse(informationPolicyValue);
   if (
     !acl.success ||
+    !informationPolicy.success ||
     !Array.isArray(resourceValue) ||
     resourceValue.length === 0 ||
     !resourceValue.every((resource) => typeof resource === "string") ||
@@ -230,7 +242,165 @@ async function authorizeDelegatedSource(
     sourceId: source.source_id,
     sourceType: source.source_type,
     resourceIds: resourceValue,
+    connectionId: source.connection_id,
+    sourceVersion: source.source_version,
+    informationPolicy: {
+      ...informationPolicy.data,
+      deploymentId: input["deploymentId"],
+      subjectPrincipalIds: [input["principalId"]],
+      allowedAudienceIds: [input["principalId"]],
+    },
+    cachePolicy: {
+      enabled: source.cache_enabled === 1,
+      ttlSeconds: source.cache_ttl_seconds,
+    },
   });
+}
+
+async function listAuthorizedDelegatedSources(request: Request, database: D1Database): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" || typeof input["principalId"] !== "string" ||
+    !input["principalId"].startsWith("principal:delegated:") || !isClaims(input["claims"])) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const rows = await database.prepare(
+    `SELECT source_id, source_type, acl_json FROM delegated_sources
+     WHERE deployment_id = ? AND enabled = 1 ORDER BY source_id LIMIT 100`,
+  ).bind(input["deploymentId"]).all<{ source_id: string; source_type: string; acl_json: string }>();
+  const sources = rows.results.flatMap((source) => {
+    try {
+      const acl = delegatedSourceAclSchema.safeParse(JSON.parse(source.acl_json) as unknown);
+      return acl.success && evaluateDelegatedSourceAcl(acl.data, input["claims"] as JwtClaims)
+        ? [{ sourceId: source.source_id, kind: source.source_type }] : [];
+    } catch { return []; }
+  });
+  return Response.json({ sources });
+}
+
+async function delegatedSources(request: Request, env: Bindings): Promise<Response> {
+  const url = new URL(request.url);
+  const deploymentId = request.method === "GET" ? url.searchParams.get("deploymentId") : undefined;
+  if (request.method === "GET") {
+    if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    const result = await env.CONTROL_DB.prepare(
+      `SELECT source_id, source_type, connection_id, resource_ids_json, acl_json,
+              information_policy_json, cache_enabled, cache_ttl_seconds, source_version,
+              enabled, created_at, updated_at
+       FROM delegated_sources WHERE deployment_id = ? ORDER BY created_at DESC`,
+    ).bind(deploymentId).all<Record<string, unknown>>();
+    const parseJson = (input: unknown): unknown => JSON.parse(String(input)) as unknown;
+    return Response.json({ sources: result.results.map((row) => ({
+      sourceId: row["source_id"], sourceType: row["source_type"], connectionId: row["connection_id"],
+      resourceIds: parseJson(row["resource_ids_json"]), acl: parseJson(row["acl_json"]),
+      informationPolicy: parseJson(row["information_policy_json"]),
+      cachePolicy: { enabled: row["cache_enabled"] === 1, ttlSeconds: row["cache_ttl_seconds"] },
+      sourceVersion: row["source_version"], enabled: row["enabled"] === 1,
+      createdAt: row["created_at"], updatedAt: row["updated_at"],
+    })) });
+  }
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const body = value as Record<string, unknown>;
+  if (typeof body["deploymentId"] !== "string" || typeof body["principalId"] !== "string" ||
+    typeof body["requestId"] !== "string" || typeof body["idempotencyKey"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const parsed = delegatedSourceDefinitionSchema.safeParse(body["source"]);
+  if (!parsed.success) return Response.json({ code: "INVALID_REQUEST", errors: parsed.error.issues }, { status: 400 });
+  const fingerprint = await sha256Hex(JSON.stringify(parsed.data));
+  const existing = await env.CONTROL_DB.prepare(
+    `SELECT source_id, source_type, connection_id, resource_ids_json, acl_json,
+            information_policy_json, cache_enabled, cache_ttl_seconds, source_version, enabled,
+            last_idempotency_key, last_update_fingerprint
+     FROM delegated_sources WHERE deployment_id = ? AND source_id = ?`,
+  ).bind(body["deploymentId"], parsed.data.sourceId).first<DelegatedSourceRow & {
+    enabled: number; last_idempotency_key: string | null; last_update_fingerprint: string | null;
+  }>();
+  if (existing?.last_idempotency_key === body["idempotencyKey"]) {
+    return existing.last_update_fingerprint === fingerprint
+      ? Response.json({ ...parsed.data, sourceVersion: existing.source_version })
+      : Response.json({ code: "IDEMPOTENCY_CONFLICT" }, { status: 409 });
+  }
+  const now = new Date().toISOString();
+  const nextVersion = (existing?.source_version ?? 0) + 1;
+  await env.CONTROL_DB.prepare(
+    `INSERT INTO delegated_sources
+     (deployment_id, source_id, source_type, resource_ids_json, acl_json, connection_id,
+      enabled, created_at, updated_at, source_version, information_policy_json,
+      cache_enabled, cache_ttl_seconds, last_idempotency_key, last_update_fingerprint)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(deployment_id, source_id) DO UPDATE SET
+       source_type = excluded.source_type, resource_ids_json = excluded.resource_ids_json,
+       acl_json = excluded.acl_json, connection_id = excluded.connection_id,
+       enabled = excluded.enabled, updated_at = excluded.updated_at,
+       source_version = excluded.source_version,
+       information_policy_json = excluded.information_policy_json,
+       cache_enabled = excluded.cache_enabled, cache_ttl_seconds = excluded.cache_ttl_seconds,
+       last_idempotency_key = excluded.last_idempotency_key,
+       last_update_fingerprint = excluded.last_update_fingerprint`,
+  ).bind(body["deploymentId"], parsed.data.sourceId, parsed.data.sourceType,
+    JSON.stringify(parsed.data.resourceIds), JSON.stringify(parsed.data.acl), parsed.data.connectionId,
+    parsed.data.enabled ? 1 : 0, now, now, nextVersion, JSON.stringify(parsed.data.informationPolicy),
+    parsed.data.cachePolicy.enabled ? 1 : 0, parsed.data.cachePolicy.ttlSeconds,
+    body["idempotencyKey"], fingerprint).run();
+  const audited = await audit(env, { deploymentId: body["deploymentId"], principalId: body["principalId"],
+    eventType: existing ? "delegated-source.updated" : "delegated-source.created", outcome: "success",
+    requestId: body["requestId"], metadata: { sourceId: parsed.data.sourceId,
+      sourceType: parsed.data.sourceType, sourceVersion: nextVersion } });
+  if (!audited) {
+    if (existing) {
+      await env.CONTROL_DB.prepare(
+        `UPDATE delegated_sources SET source_type = ?, connection_id = ?, resource_ids_json = ?,
+         acl_json = ?, information_policy_json = ?, cache_enabled = ?, cache_ttl_seconds = ?,
+         source_version = ?, enabled = ?, last_idempotency_key = ?, last_update_fingerprint = ?
+         WHERE deployment_id = ? AND source_id = ?`,
+      ).bind(existing.source_type, existing.connection_id, existing.resource_ids_json,
+        existing.acl_json, existing.information_policy_json, existing.cache_enabled,
+        existing.cache_ttl_seconds, existing.source_version, existing.enabled,
+        existing.last_idempotency_key, existing.last_update_fingerprint,
+        body["deploymentId"], parsed.data.sourceId).run();
+    } else {
+      await env.CONTROL_DB.prepare(
+        "DELETE FROM delegated_sources WHERE deployment_id = ? AND source_id = ?",
+      ).bind(body["deploymentId"], parsed.data.sourceId).run();
+    }
+    return Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+  }
+  return Response.json({ ...parsed.data, sourceVersion: nextVersion }, { status: existing ? 200 : 201 });
+}
+
+async function deleteDelegatedSource(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const body = value as Record<string, unknown>;
+  if (typeof body["deploymentId"] !== "string" || typeof body["sourceId"] !== "string" ||
+    typeof body["principalId"] !== "string" || typeof body["requestId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const result = await env.CONTROL_DB.prepare(
+    `UPDATE delegated_sources SET enabled = 0, source_version = source_version + 1, updated_at = ?
+     WHERE deployment_id = ? AND source_id = ? AND enabled = 1`,
+  ).bind(new Date().toISOString(), body["deploymentId"], body["sourceId"]).run();
+  if (result.meta.changes !== 1) return Response.json({ code: "SOURCE_NOT_FOUND" }, { status: 404 });
+  const audited = await audit(env, { deploymentId: body["deploymentId"], principalId: body["principalId"],
+    eventType: "delegated-source.deleted", outcome: "success", requestId: body["requestId"],
+    metadata: { sourceId: body["sourceId"] } });
+  if (!audited) {
+    await env.CONTROL_DB.prepare(
+      `UPDATE delegated_sources SET enabled = 1, source_version = MAX(1, source_version - 1)
+       WHERE deployment_id = ? AND source_id = ?`,
+    ).bind(body["deploymentId"], body["sourceId"]).run();
+    return Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+  }
+  return new Response(null, { status: 204 });
 }
 
 const approvalJson = (row: ApprovalRow) => ({
@@ -943,6 +1113,17 @@ export default {
       url.pathname === "/internal/v1/delegated/source/authorize"
     ) {
       return authorizeDelegatedSource(request, env.CONTROL_DB);
+    }
+    if (request.method === "POST" &&
+      url.pathname === "/internal/v1/delegated/sources/authorized") {
+      return listAuthorizedDelegatedSources(request, env.CONTROL_DB);
+    }
+    if ((request.method === "GET" || request.method === "POST" || request.method === "PATCH") &&
+      url.pathname === "/internal/v1/delegated/sources") {
+      return delegatedSources(request, env);
+    }
+    if (request.method === "DELETE" && url.pathname === "/internal/v1/delegated/sources") {
+      return deleteDelegatedSource(request, env);
     }
     if (request.method === "GET" && url.pathname === "/internal/v1/approvals") {
       return listApprovals(request, env);

@@ -138,7 +138,8 @@ describe("ModelRouter", () => {
 
   it("routes Workers AI through the configured Gateway", async () => {
     const calls: {
-      input: { messages: readonly unknown[]; max_tokens: number };
+      input: { messages: readonly unknown[]; max_completion_tokens: number;
+        reasoning_effort?: "low" | "medium" | "high" };
       options?: { gateway?: { id: string; collectLog?: boolean; metadata?: Readonly<Record<string, string>> } };
     }[] = [];
     const provider = new WorkersAiProvider({
@@ -150,9 +151,10 @@ describe("ModelRouter", () => {
     await expect(provider.generate({
       messages: [{ role: "user", content: "hello" }],
       informationPolicy: policy({ allowedDestinationIds: ["provider:workers-ai"] }),
-      audience: "owner",
+      audience: "owner", reasoningEffort: "low",
     })).resolves.toMatchObject({ text: "workers response" });
-    expect(calls[0]?.input.max_tokens).toBe(2_048);
+    expect(calls[0]?.input.max_completion_tokens).toBe(2_048);
+    expect(calls[0]?.input.reasoning_effort).toBe("low");
     expect(calls[0]?.options).toEqual({ gateway: {
       id: "opap-gateway",
       collectLog: false,

@@ -3,3 +3,16 @@ DISCORD_BOT_TOKEN=
 
 # Optional experimental Gateway Bridge secret.
 DISCORD_BRIDGE_SIGNING_KEY=
+
+# Delegated Source Gatekeeper. Use credentials separate from personal connectors.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+CREDENTIAL_KEK=
+
+# Delegated API JWT principal pseudonymization key.
+DELEGATED_PRINCIPAL_HMAC_SECRET=
+
+# Optional real staging acceptance test input. Never commit a populated token.
+DELEGATED_TEST_JWT=

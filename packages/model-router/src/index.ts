@@ -35,6 +35,7 @@ export type ModelRequest = {
   taskId?: string;
   audience?: "owner" | "public" | "delegated";
   maxOutputTokens?: number;
+  reasoningEffort?: "low" | "medium" | "high";
   tools?: readonly ModelToolDefinition[];
 };
 
@@ -283,7 +284,8 @@ export type WorkersAiBinding = {
     model: string,
     input: {
       messages: ModelRequest["messages"];
-      max_tokens: number;
+      max_completion_tokens: number;
+      reasoning_effort?: "low" | "medium" | "high";
       tools?: readonly ModelToolDefinition[];
       tool_choice?: "auto";
     },
@@ -323,7 +325,8 @@ export class WorkersAiProvider implements ModelProvider {
         this.model,
         {
           messages: request.messages,
-          max_tokens: resolveMaxOutputTokens(request),
+          max_completion_tokens: resolveMaxOutputTokens(request),
+          ...(request.reasoningEffort ? { reasoning_effort: request.reasoningEffort } : {}),
           ...(request.tools?.length
             ? { tools: request.tools, tool_choice: "auto" as const }
             : {}),

@@ -1,6 +1,6 @@
 {
   "name": "@opap/delegated-agent-api",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,10 @@
   "dependencies": {
     "@opap/contracts": "workspace:*",
     "@opap/identity": "workspace:*",
+    "@opap/knowledge-source": "workspace:*",
+    "@opap/knowledge-api": "workspace:*",
+    "@opap/model-router": "workspace:*",
+    "@opap/security": "workspace:*",
     "hono": "^4.10.7"
   },
   "devDependencies": {

@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   OAUTH_PROVIDERS,
   OAuthProviderError,
@@ -289,6 +290,67 @@ const providerFetch = async (url: URL, providerId: ProviderId, accessToken: stri
   return new Response(text, { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 };
 
+const githubRecords = (value: unknown): Record<string, unknown>[] => Array.isArray(value)
+  ? value.flatMap((item) => typeof item === "object" && item !== null && !Array.isArray(item)
+    ? [item as Record<string, unknown>] : [])
+  : [];
+
+const githubJsonRecordValue = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+
+const githubSearchTerms = (query: string): string[] => [...new Set(query.normalize("NFKC")
+  .toLocaleLowerCase().split(/[^\p{L}\p{N}_.-]+/u).filter((term) => term.length >= 2))].slice(0, 8);
+
+const githubMatches = (terms: readonly string[], ...values: unknown[]): boolean => {
+  const searchable = values.filter((value): value is string => typeof value === "string")
+    .join("\n").normalize("NFKC").toLocaleLowerCase();
+  return terms.length > 0 && terms.some((term) => searchable.includes(term));
+};
+
+export const githubTreeFallbackItems = (input: {
+  query: string;
+  resourceId: string;
+  defaultBranch: string;
+  tree: unknown;
+  maximum: number;
+}): Record<string, unknown>[] => {
+  const terms = githubSearchTerms(input.query);
+  const output: Record<string, unknown>[] = [];
+  for (const item of githubRecords(input.tree)) {
+    if (output.length >= input.maximum || item["type"] !== "blob" ||
+      !githubMatches(terms, item["path"])) continue;
+    const path = String(item["path"]);
+    output.push({
+      path,
+      html_url: `https://github.com/${input.resourceId}/blob/${encodeURIComponent(input.defaultBranch)}/${path
+        .split("/").map(encodeURIComponent).join("/")}`,
+      text_matches: [{ fragment: path }],
+    });
+  }
+  return output;
+};
+
+export const githubIssueFallbackItems = (query: string, issues: unknown,
+  maximum: number): Record<string, unknown>[] => {
+  const terms = githubSearchTerms(query);
+  return githubRecords(issues).filter((item) =>
+    githubMatches(terms, item["title"], item["body"])).slice(0, maximum);
+};
+
+const githubJsonRecord = async (response: Response): Promise<Record<string, unknown> | undefined> => {
+  const value: unknown = await response.json().catch(() => null);
+  return githubJsonRecordValue(value);
+};
+
+const decodeGitHubContent = (value: unknown): string => {
+  if (typeof value !== "string" || value.length > 1_400_000) return "";
+  try {
+    const binary = atob(value.replaceAll(/\s/gu, ""));
+    return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+  } catch { return ""; }
+};
+
 const googleValue = async (url: URL, accessToken: string): Promise<Record<string, unknown> | undefined> => {
   const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } });
   const value: unknown = await response.json().catch(() => null);
@@ -358,6 +420,16 @@ const readSource = async (request: Request, env: Bindings): Promise<Response> =>
       url.searchParams.set("fields", "files(id,name,mimeType,modifiedTime,webViewLink)");
       return providerFetch(url, "google", active.accessToken);
     }
+    if (body["operation"] === "folder.search") {
+      const url = new URL("https://www.googleapis.com/drive/v3/files");
+      const query = typeof body["query"] === "string" && body["query"].length <= 256
+        ? body["query"].replaceAll("'", "\\'") : "";
+      if (!query) return json({ code: "INVALID_REQUEST" }, 400);
+      url.searchParams.set("q", `'${body["resourceId"]}' in parents and trashed = false and fullText contains '${query}'`);
+      url.searchParams.set("pageSize", String(Math.min(Math.max(Number(body["maxResults"]) || 20, 1), 20)));
+      url.searchParams.set("fields", "files(id,name,mimeType,modifiedTime,webViewLink,description,parents)");
+      return providerFetch(url, "google", active.accessToken);
+    }
   } else {
     const repository = body["resourceId"].split("/").map(encodeURIComponent).join("/");
     if (body["operation"] === "repository.get") {
@@ -374,6 +446,80 @@ const readSource = async (request: Request, env: Bindings): Promise<Response> =>
       const path = body["path"].split("/").map(encodeURIComponent).join("/");
       return providerFetch(new URL(`https://api.github.com/repos/${repository}/contents/${path}`),
         "github", active.accessToken);
+    }
+    if (body["operation"] === "repository.search" && typeof body["query"] === "string" &&
+      body["query"].length > 0 && body["query"].length <= 256) {
+      const maximum = Math.min(Math.max(Number(body["maxResults"]) || 20, 1), 20);
+      const qualifier = `${body["query"]} repo:${body["resourceId"]}`;
+      const codeUrl = new URL("https://api.github.com/search/code");
+      codeUrl.searchParams.set("q", qualifier);
+      codeUrl.searchParams.set("per_page", String(maximum));
+      const issuesUrl = new URL("https://api.github.com/search/issues");
+      issuesUrl.searchParams.set("q", qualifier);
+      issuesUrl.searchParams.set("per_page", String(maximum));
+      const headers = { Authorization: `Bearer ${active.accessToken}`,
+        Accept: "application/vnd.github.text-match+json", "User-Agent": "open-personal-agent-platform",
+        "X-GitHub-Api-Version": "2026-03-10" };
+      const [codeResponse, issuesResponse] = await Promise.all([
+        fetch(codeUrl, { headers }), fetch(issuesUrl, { headers }),
+      ]);
+      if (!codeResponse.ok || !issuesResponse.ok) {
+        console.warn("Delegated GitHub search request was partially rejected", {
+          codeStatus: codeResponse.status,
+          issuesStatus: issuesResponse.status,
+          codeAcceptedPermissions: codeResponse.headers.get("x-accepted-github-permissions"),
+          issuesAcceptedPermissions: issuesResponse.headers.get("x-accepted-github-permissions"),
+        });
+      }
+      if (!codeResponse.ok && !issuesResponse.ok) return json({ code: "SOURCE_READ_FAILED" }, 502);
+      let [code, issues] = await Promise.all([
+        codeResponse.ok ? codeResponse.json().catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+        issuesResponse.ok ? issuesResponse.json().catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+      ]);
+      const codeItems = githubRecords(githubJsonRecordValue(code)?.["items"]);
+      const issueItems = githubRecords(githubJsonRecordValue(issues)?.["items"]);
+      if (codeItems.length === 0) {
+        const repositoryResponse = await fetch(`https://api.github.com/repos/${repository}`, { headers });
+        const repositoryValue = repositoryResponse.ok
+          ? await githubJsonRecord(repositoryResponse) : undefined;
+        const defaultBranch = typeof repositoryValue?.["default_branch"] === "string"
+          ? repositoryValue["default_branch"] : undefined;
+        let fallbackItems: Record<string, unknown>[] = [];
+        if (defaultBranch) {
+          const treeUrl = new URL(`https://api.github.com/repos/${repository}/git/trees/${encodeURIComponent(defaultBranch)}`);
+          treeUrl.searchParams.set("recursive", "1");
+          const treeResponse = await fetch(treeUrl, { headers });
+          const treeValue = treeResponse.ok ? await githubJsonRecord(treeResponse) : undefined;
+          fallbackItems = githubTreeFallbackItems({ query: body["query"],
+            resourceId: body["resourceId"], defaultBranch, tree: treeValue?.["tree"], maximum });
+          if (fallbackItems.length === 0) {
+            const readmeResponse = await fetch(`https://api.github.com/repos/${repository}/readme`, { headers });
+            const readme = readmeResponse.ok ? await githubJsonRecord(readmeResponse) : undefined;
+            const path = typeof readme?.["path"] === "string" ? readme["path"] : undefined;
+            const uri = typeof readme?.["html_url"] === "string" ? readme["html_url"] : undefined;
+            const content = decodeGitHubContent(readme?.["content"]);
+            if (path && uri) fallbackItems.push({ path, html_url: uri,
+              text_matches: [{ fragment: content ? content.slice(0, 32_768) : path }] });
+          }
+        }
+        code = { total_count: fallbackItems.length, incomplete_results: false, items: fallbackItems };
+      }
+      if (issueItems.length === 0) {
+        const issueListUrl = new URL(`https://api.github.com/repos/${repository}/issues`);
+        issueListUrl.searchParams.set("state", "all");
+        issueListUrl.searchParams.set("sort", "updated");
+        issueListUrl.searchParams.set("per_page", "50");
+        const issueListResponse = await fetch(issueListUrl, { headers });
+        const listed: unknown = issueListResponse.ok
+          ? await issueListResponse.json().catch(() => []) : [];
+        const fallbackIssues = githubIssueFallbackItems(body["query"], listed, maximum);
+        issues = { total_count: fallbackIssues.length, incomplete_results: false, items: fallbackIssues };
+      }
+      const output = JSON.stringify({ repository: body["resourceId"], code, issues });
+      if (new TextEncoder().encode(output).byteLength > 1_048_576) {
+        return json({ code: "SOURCE_RESULT_TOO_LARGE" }, 413);
+      }
+      return new Response(output, { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
     }
   }
   return json({ code: "SOURCE_OPERATION_DENIED" }, 403);
@@ -413,16 +559,36 @@ const disconnect = async (request: Request, env: Bindings): Promise<Response> =>
 };
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  fetch(request): Response {
     const path = new URL(request.url).pathname;
     if (request.method === "GET" && path === "/internal/v1/health") {
       return json({ service: "delegated-source-gatekeeper", status: "ok" });
     }
-    if (request.method === "POST" && path === "/internal/v1/oauth/start") return beginOAuth(request, env);
-    if (request.method === "POST" && path === "/internal/v1/oauth/callback") return finishOAuth(request, env);
-    if (request.method === "GET" && path === "/internal/v1/connections") return listConnections(request, env);
-    if (request.method === "DELETE" && path === "/internal/v1/connections") return disconnect(request, env);
-    if (request.method === "POST" && path === "/internal/v1/read") return readSource(request, env);
     return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
   },
 } satisfies ExportedHandler<Bindings>;
+
+export class DelegatedSourceAdminEntrypoint extends WorkerEntrypoint<Bindings> {
+  override async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (request.method === "GET" && path === "/internal/v1/health") {
+      return json({ service: "delegated-source-gatekeeper", entrypoint: "admin", status: "ok" });
+    }
+    if (request.method === "POST" && path === "/internal/v1/oauth/start") return beginOAuth(request, this.env);
+    if (request.method === "POST" && path === "/internal/v1/oauth/callback") return finishOAuth(request, this.env);
+    if (request.method === "GET" && path === "/internal/v1/connections") return listConnections(request, this.env);
+    if (request.method === "DELETE" && path === "/internal/v1/connections") return disconnect(request, this.env);
+    return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  }
+}
+
+export class DelegatedSourceReadEntrypoint extends WorkerEntrypoint<Bindings> {
+  override async fetch(request: Request): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (request.method === "GET" && path === "/internal/v1/health") {
+      return json({ service: "delegated-source-gatekeeper", entrypoint: "read", status: "ok" });
+    }
+    if (request.method === "POST" && path === "/internal/v1/read") return readSource(request, this.env);
+    return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  }
+}

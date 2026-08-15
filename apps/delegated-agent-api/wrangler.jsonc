@@ -10,12 +10,28 @@
     "DEPLOYMENT_ID": "deployment:default",
     "DELEGATED_ISSUER": "https://issuer.example.invalid",
     "DELEGATED_AUDIENCE": "configure-me",
-    "DELEGATED_JWKS_URI": "https://issuer.example.invalid/.well-known/jwks.json"
+    "DELEGATED_JWKS_URI": "https://issuer.example.invalid/.well-known/jwks.json",
+    "AI_GATEWAY_ID": "default",
+    "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
+    "AI_MONTHLY_OVERAGE_USD": "5"
   },
+  "ai": { "binding": "AI" },
   "services": [
     {
       "binding": "CONTROL",
       "service": "opap-policy-control"
+    },
+    {
+      "binding": "DELEGATED_SOURCE_READ",
+      "service": "opap-delegated-source-gatekeeper",
+      "entrypoint": "DelegatedSourceReadEntrypoint"
     }
-  ]
+  ],
+  "durable_objects": {
+    "bindings": [{
+      "name": "DELEGATED_QUOTA",
+      "class_name": "QuotaDurableObject",
+      "script_name": "opap-quota"
+    }]
+  }
 }

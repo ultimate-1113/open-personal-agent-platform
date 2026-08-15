@@ -48,6 +48,7 @@ type Bindings = {
   GOOGLE_GATEKEEPER: Fetcher;
   GITHUB_GATEKEEPER: Fetcher;
   DISCORD_GATEKEEPER: Fetcher;
+  DELEGATED_SOURCE_ADMIN: Fetcher;
   DISCORD_APPLICATION_ID?: string;
   CONVERSATIONS: DurableObjectNamespace;
   OWNER_QUOTA: DurableObjectNamespace;
@@ -523,7 +524,7 @@ async function reserveOwnerOperation(input: {
 }): Promise<OwnerReservation | "unavailable" | "limit" | "conflict"> {
   const reservationId = `reservation:${crypto.randomUUID()}`;
   const quota = input.bindings.OWNER_QUOTA.get(
-    input.bindings.OWNER_QUOTA.idFromName("owner"),
+    input.bindings.OWNER_QUOTA.idFromName(input.bindings.DEPLOYMENT_ID),
   );
   const response = await quota.fetch("https://quota.internal/reserve", {
     method: "POST",
@@ -590,7 +591,7 @@ async function reserveAi(input: {
   now: Date;
 }): Promise<AiReservation | "unavailable" | "limit" | "conflict"> {
   const quota = input.bindings.OWNER_QUOTA.get(
-    input.bindings.OWNER_QUOTA.idFromName("owner"),
+    input.bindings.OWNER_QUOTA.idFromName(input.bindings.DEPLOYMENT_ID),
   );
   const reservationId = `reservation:ai:${crypto.randomUUID()}`;
   const estimatedNeurons = estimateWorkersAiNeurons(input.request);
@@ -713,6 +714,7 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     context.set("ownerPrincipalId", authorization.principalId);
     return next();
   };
+  app.use("/v1/usage/*", authorizeConversation);
   app.use("/v1/settings/preferences", authorizeConversation);
   app.use("/v1/conversations", authorizeConversation);
   app.use("/v1/conversations/*", authorizeConversation);
@@ -722,6 +724,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   }
   app.use("/v1/connections", authorizeConversation);
   app.use("/v1/connections/*", authorizeConversation);
+  app.use("/v1/delegated-sources", authorizeConversation);
+  app.use("/v1/delegated-sources/*", authorizeConversation);
   app.use("/v1/google", authorizeConversation);
   app.use("/v1/google/*", authorizeConversation);
   app.use("/v1/github", authorizeConversation);
@@ -925,6 +929,123 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     );
     if (response.ok) (github ? githubConnectionCache : googleConnectionCache)
       .delete(context.env.DEPLOYMENT_ID);
+    return new Response(response.body, response);
+  });
+
+  app.get("/v1/delegated-sources", async (context) => {
+    const url = new URL("https://control.internal/internal/v1/delegated/sources");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const connectionsUrl = new URL("https://delegated-source-admin.internal/internal/v1/connections");
+    connectionsUrl.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const [response, connectionsResponse] = await Promise.all([
+      context.env.CONTROL.fetch(url), context.env.DELEGATED_SOURCE_ADMIN.fetch(connectionsUrl),
+    ]);
+    if (!response.ok) return new Response(response.body, response);
+    const [sourcesValue, connectionsValue]: [unknown, unknown] = await Promise.all([
+      response.json(), connectionsResponse.ok ? connectionsResponse.json()
+        : Promise.resolve({ connections: [] }),
+    ]);
+    const sources = typeof sourcesValue === "object" && sourcesValue !== null
+      ? sourcesValue as Record<string, unknown> : {};
+    const connections = typeof connectionsValue === "object" && connectionsValue !== null
+      ? connectionsValue as Record<string, unknown> : {};
+    return context.json({ ...sources, connections: connections["connections"] ?? [] });
+  });
+
+  const writeDelegatedSource = async (
+    context: Parameters<MiddlewareHandler<AssistantEnv>>[0],
+    method: "POST" | "PATCH",
+    source?: unknown,
+  ): Promise<Response> => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const sourceValue: unknown = source ?? await context.req.json().catch(() => null);
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/delegated/sources", {
+        method, headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"),
+          requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
+          idempotencyKey, source: sourceValue }),
+      },
+    );
+    return new Response(response.body, response);
+  };
+
+  app.post("/v1/delegated-sources", (context) => writeDelegatedSource(context, "POST"));
+  app.patch("/v1/delegated-sources/:sourceId", async (context) => {
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const sourceId = context.req.param("sourceId");
+    if ((value as Record<string, unknown>)["sourceId"] !== sourceId) {
+      return problem(context.req.raw, 400, "SOURCE_ID_MISMATCH");
+    }
+    return writeDelegatedSource(context, "PATCH", value);
+  });
+
+  app.delete("/v1/delegated-sources/:sourceId", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/delegated/sources", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"), sourceId: context.req.param("sourceId"),
+          requestId: context.req.header("cf-ray") ?? crypto.randomUUID(), idempotencyKey }),
+      },
+    );
+    return new Response(response.body, response);
+  });
+
+  app.post("/v1/connections/delegated/:provider/start", async (context) => {
+    const providerId = context.req.param("provider");
+    if (providerId !== "google" && providerId !== "github") {
+      return problem(context.req.raw, 404, "SOURCE_NOT_FOUND");
+    }
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value) ||
+      !Array.isArray((value as Record<string, unknown>)["resourceIds"])) {
+      return problem(context.req.raw, 400, "RESOURCE_ALLOWLIST_REQUIRED");
+    }
+    const redirectUri = new URL(`/v1/connections/delegated/${providerId}/callback`,
+      new URL(context.req.url).origin).toString();
+    const response = await context.env.DELEGATED_SOURCE_ADMIN.fetch(
+      "https://delegated-source-admin.internal/internal/v1/oauth/start", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID, providerId, redirectUri,
+          resourceIds: (value as Record<string, unknown>)["resourceIds"] }),
+      },
+    );
+    return new Response(response.body, response);
+  });
+
+  app.get("/v1/connections/delegated/:provider/callback", async (context) => {
+    const code = context.req.query("code");
+    const state = context.req.query("state");
+    if (!code || !state) return problem(context.req.raw, 400, "OAUTH_CALLBACK_INVALID");
+    const response = await context.env.DELEGATED_SOURCE_ADMIN.fetch(
+      "https://delegated-source-admin.internal/internal/v1/oauth/callback", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"), code, state }),
+      },
+    );
+    if (!response.ok) return new Response(response.body, response);
+    return context.redirect("/?tab=knowledge&status=connected", 302);
+  });
+
+  app.delete("/v1/connections/delegated/:connectionId", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const response = await context.env.DELEGATED_SOURCE_ADMIN.fetch(
+      "https://delegated-source-admin.internal/internal/v1/connections", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          connectionId: context.req.param("connectionId") }),
+      },
+    );
     return new Response(response.body, response);
   });
 
@@ -1461,6 +1582,19 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         idempotencyKey,
         occurredAt: (dependencies.now?.() ?? new Date()).toISOString(),
       });
+      if (context.env?.OWNER_QUOTA) {
+        const quota = context.env.OWNER_QUOTA.get(
+          context.env.OWNER_QUOTA.idFromName(context.env.DEPLOYMENT_ID),
+        );
+        const quotaPolicy = await quota.fetch("https://quota.internal/set-ai-policy", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+            action: "set-ai-policy", deploymentId: context.env.DEPLOYMENT_ID,
+            monthlyOverageMicros: updated.ai.monthlyOverageUsd === null ? null
+              : Math.round(updated.ai.monthlyOverageUsd * 1_000_000),
+          }),
+        });
+        if (!quotaPolicy.ok) return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+      }
       return context.json(updated);
     } catch (error) {
       if (error instanceof CostPolicyConflictError) {
@@ -1532,7 +1666,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const currentPeriod = (dependencies.now?.() ?? new Date())
       .toISOString()
       .slice(0, 7);
-    const quota = context.env.OWNER_QUOTA.get(context.env.OWNER_QUOTA.idFromName("owner"));
+    const quota = context.env.OWNER_QUOTA.get(
+      context.env.OWNER_QUOTA.idFromName(context.env.DEPLOYMENT_ID),
+    );
     const url = new URL("https://quota.internal/usage");
     url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
     url.searchParams.set("scopeId", context.get("ownerPrincipalId"));
@@ -1550,6 +1686,32 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       resources,
       ai: usageRecord["ai"] ?? null,
     });
+  });
+
+  app.post("/v1/usage/migrate", async (context) => {
+    const target = context.env.OWNER_QUOTA.get(
+      context.env.OWNER_QUOTA.idFromName(context.env.DEPLOYMENT_ID),
+    );
+    const imported: unknown[] = [];
+    for (const sourceShard of ["owner", "public"] as const) {
+      const source = context.env.OWNER_QUOTA.get(context.env.OWNER_QUOTA.idFromName(sourceShard));
+      const exportedResponse = await source.fetch(
+        `https://quota.internal/export-legacy?deploymentId=${encodeURIComponent(context.env.DEPLOYMENT_ID)}`,
+      );
+      if (!exportedResponse.ok) return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+      const snapshot: unknown = await exportedResponse.json();
+      if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+        return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+      }
+      const response = await target.fetch("https://quota.internal/import-legacy", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          action: "import-legacy", deploymentId: context.env.DEPLOYMENT_ID, sourceShard, ...snapshot,
+        }),
+      });
+      if (!response.ok) return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+      imported.push(await response.json());
+    }
+    return context.json({ imported });
   });
 
   app.post("/v1/conversations", async (context) => {

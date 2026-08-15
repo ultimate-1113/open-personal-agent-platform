@@ -8,8 +8,8 @@ Open Personal Agent Platformは、Cloudflareを常時稼働する制御基盤と
 外部サイトの利用者はDelegated Principalとして分離され、Ownerの個人秘書を共同利用しません。
 
 > [!WARNING]
-> 現在のリリースは`v0.1.0-alpha.1`です。
-> Phase 3のConnector実装をstagingで段階的に検証している段階であり、本番SLAと長期API互換性は提供していません。
+> 現在のリリースは`v0.1.0-alpha.2`です。
+> Phase 4のKnowledge APIを実装した段階であり、本番SLAと長期API互換性は提供していません。
 
 ## 現在利用できる機能
 
@@ -29,13 +29,17 @@ Open Personal Agent Platformは、Cloudflareを常時稼働する制御基盤と
 - Repository読取、承認付きIssue作成、承認付きComment投稿を行うGitHub App Connector
 - DiscordのSlash Command、Owner Link、Task Scheduling、Approval、通知、実験的DM Gateway Bridge
 - CredentialとResource Allowlistを分離した読取専用Delegated Source Gatekeeper
+- Modelを使わない検索と引用付き回答を提供するPublicおよびDelegatedの`POST /v1/query`
+- Fixture、静的Index、AI Search、Google Drive、GitHubのKnowledge Adapter
+- OpenAPI 3.1、型付き`@opap/sdk`、stateless Streamable HTTP MCP
+- 実際の`okidev-web` AI Search Bindingとstaging専用のPublic Endpoint互換Transport
 
 Ownerは招待や他者の承認なしで初回設定を開始します。
 Delegated Principalは明示的に公開されたSourceだけを読み取れます。
 
 ## 未実装の機能
 
-公開Knowledge API、Delegated SourceのQuery接続、MCP、生成SDK、動的Sandbox Pluginは後続Phaseで実装します。
+動的Sandbox Pluginと本番配置ProfileはPhase 5で実装します。
 GitHubコード変更、決済、複数Owner、複数Tenantはv0.1の対象外です。
 Gmail送信は、正確な内容をOwnerが承認した場合に限り利用できます。
 
@@ -98,6 +102,7 @@ pnpm check
 - [Identity設定](docs/ja/operations/identity-configuration.md)
 - [Owner操作面](docs/ja/operations/owner-surface.md)
 - [Phase 3 Connector](docs/ja/operations/phase-3-connectors.md)
+- [Phase 4 Knowledge API](docs/ja/operations/phase-4-knowledge.md)
 - [Google・GitHub Provider設定](docs/ja/operations/connector-provider-setup.md)
 - [多言語対応](docs/ja/contributing/localization.md)
 

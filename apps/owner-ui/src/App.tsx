@@ -3,7 +3,7 @@ import { useLocale, type Locale, type Translate } from "./i18n.js";
 import type { MessageKey } from "./locales/en.js";
 import { useTheme } from "./theme.js";
 
-type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget" | "connections";
+type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget" | "connections" | "knowledge";
 type ApprovalFilter = "pending" | "approved" | "all";
 type ConnectorApprovalMode = "manual" | "open" | "auto-read";
 type ApiRecord = Record<string, unknown>;
@@ -22,6 +22,7 @@ const tabs: readonly { id: Tab; labelKey: MessageKey }[] = [
   { id: "providers", labelKey: "tab.providers" },
   { id: "budget", labelKey: "tab.budget" },
   { id: "connections", labelKey: "tab.connections" },
+  { id: "knowledge", labelKey: "tab.knowledge" },
 ];
 
 const api = async (
@@ -61,6 +62,10 @@ const display = (value: unknown, fallback = ""): string =>
 const localizedError = (reason: unknown, t: Translate, fallback: MessageKey): string =>
   reason instanceof Error ? reason.message : t(fallback);
 
+const knowledgeProviderLabel = (value: unknown, t: Translate): string =>
+  value === "google" || value === "google-drive" ? t("knowledge.googleDrive")
+    : value === "github" ? t("knowledge.github") : display(value);
+
 const defaultTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Tokyo";
 
 const fixedOffsetTimeZones = (): string[] => Array.from({ length: 105 }, (_, index) => {
@@ -83,6 +88,11 @@ const supportedTimeZones = (): string[] => {
 };
 
 const timeZoneOptions = supportedTimeZones();
+
+const initialTab = (): Tab => {
+  const requested = new URLSearchParams(window.location.search).get("tab");
+  return tabs.some((candidate) => candidate.id === requested) ? requested as Tab : "conversation";
+};
 
 const scheduleFromForm = (form: FormData, ownerTimeZone: string): ApiRecord | undefined => {
   const kind = formText(form, "scheduleKind");
@@ -156,7 +166,7 @@ function TaskScheduleFields({ item, t, ownerTimeZone }: { item?: ApiRecord; t: T
 export function App() {
   const { locale, setLocale, t } = useLocale();
   const { theme, toggleTheme } = useTheme();
-  const [tab, setTab] = useState<Tab>("conversation");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [conversationId, setConversationId] = useState(
     () => localStorage.getItem("opap.conversationId") ?? "",
   );
@@ -214,6 +224,8 @@ export function App() {
         nextData = await request("/v1/settings/providers");
       } else if (tab === "connections") {
         nextData = await request("/v1/connections");
+      } else if (tab === "knowledge") {
+        nextData = await request("/v1/delegated-sources");
       } else {
         const [policy, usage] = await Promise.all([
           request("/v1/settings/budgets"),
@@ -520,6 +532,85 @@ export function App() {
     }
   };
 
+  const connectDelegatedSource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const provider = formText(form, "provider");
+    const resourceIds = formText(form, "resourceIds").split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
+    setBusy(true); setError("");
+    try {
+      const result = await request(`/v1/connections/delegated/${encodeURIComponent(provider)}/start`, {
+        method: "POST", body: JSON.stringify({ resourceIds }),
+      });
+      const authorizationUrl = display(result["authorizationUrl"]);
+      if (!authorizationUrl) throw new Error(t("errors.connection"));
+      window.location.assign(authorizationUrl);
+    } catch (reason) { setError(localizedError(reason, t, "errors.connection")); setBusy(false); }
+  };
+
+  const saveDelegatedSource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const values = formText(form, "aclValues").split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
+    const resourceIds = formText(form, "resourceIds").split(/[\n,]/u).map((value) => value.trim()).filter(Boolean);
+    const sourceId = formText(form, "sourceId");
+    const cloudAllowed = form.get("cloudAllowed") === "on";
+    const [claim, operator] = formText(form, "aclRule").split(":");
+    setBusy(true); setError("");
+    try {
+      await request("/v1/delegated-sources", { method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
+          sourceId, sourceType: formText(form, "sourceType"), connectionId: formText(form, "connectionId"),
+          resourceIds, acl: { issuer: formText(form, "issuer"), audience: formText(form, "audience"),
+            rules: [{ claim, operator, values }] },
+          informationPolicy: { subjectPrincipalIds: [], visibility: "delegated-principal",
+            sensitivity: formText(form, "sensitivity"), trust: "external", allowedAudienceIds: [],
+            allowedDestinationIds: cloudAllowed ? ["provider:workers-ai"] : [], retention: { mode: "none" } },
+          cachePolicy: { enabled: form.get("cacheEnabled") === "on", ttlSeconds: Number(form.get("cacheTtl")) },
+          sourceVersion: 1, enabled: true,
+        }),
+      });
+      formElement.reset(); await load();
+    } catch (reason) { setError(localizedError(reason, t, "errors.save")); }
+    finally { setBusy(false); }
+  };
+
+  const disconnectDelegatedSource = async (connectionId: string) => {
+    if (!window.confirm(t("knowledge.disconnectConfirm"))) return;
+    setBusy(true); setError("");
+    try {
+      await request(`/v1/connections/delegated/${encodeURIComponent(connectionId)}`, { method: "DELETE" });
+      await load();
+    } catch (reason) { setError(localizedError(reason, t, "errors.connection")); }
+    finally { setBusy(false); }
+  };
+
+  const deleteDelegatedSource = async (sourceId: string) => {
+    if (!window.confirm(t("knowledge.deleteConfirm"))) return;
+    setBusy(true); setError("");
+    try { await request(`/v1/delegated-sources/${encodeURIComponent(sourceId)}`, { method: "DELETE",
+      headers: { "Idempotency-Key": crypto.randomUUID() } }); await load(); }
+    catch (reason) { setError(localizedError(reason, t, "errors.save")); }
+    finally { setBusy(false); }
+  };
+
+  const toggleDelegatedSourceCache = async (source: ApiRecord) => {
+    const sourceId = display(source["sourceId"]);
+    const current = typeof source["cachePolicy"] === "object" && source["cachePolicy"] !== null
+      ? source["cachePolicy"] as ApiRecord : {};
+    setBusy(true); setError("");
+    try {
+      await request(`/v1/delegated-sources/${encodeURIComponent(sourceId)}`, { method: "PATCH",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ ...source,
+          cachePolicy: { enabled: current["enabled"] !== true,
+            ttlSeconds: Number(current["ttlSeconds"] ?? 60) },
+        }) });
+      await load();
+    } catch (reason) { setError(localizedError(reason, t, "errors.save")); }
+    finally { setBusy(false); }
+  };
+
   const createDiscordLinkCode = async () => {
     if (!conversationId) {
       setError(t("connections.discordConversationRequired"));
@@ -738,6 +829,10 @@ export function App() {
   const discordInstallUrls = typeof discord["installUrls"] === "object" && discord["installUrls"] !== null
     ? discord["installUrls"] as ApiRecord : {};
   const discordDestinations = rows(discord["destinations"]);
+  const delegatedConnections = tab === "knowledge" ? rows(data["connections"])
+    .filter((connection) => connection["status"] === "active") : [];
+  const delegatedSources = tab === "knowledge" ? rows(data["sources"])
+    .filter((source) => source["enabled"] !== false) : [];
   const activeTab = tabs.find((item) => item.id === tab);
 
   return <div className="shell">
@@ -920,6 +1015,57 @@ export function App() {
             </div>
           </section>
         </>}
+      {tab === "knowledge" && <>
+        <form className="memory-form" onSubmit={(event) => { void connectDelegatedSource(event); }}>
+          <strong>{t("knowledge.connectTitle")}</strong>
+          <label>{t("knowledge.provider")}<select name="provider"><option value="google">{t("knowledge.googleDrive")}</option>
+            <option value="github">{t("knowledge.github")}</option></select></label>
+          <label>{t("knowledge.resourceIds")}<textarea name="resourceIds" required
+            placeholder={t("knowledge.resourceIdsHelp")} /></label>
+          <button disabled={busy}>{t("knowledge.connect")}</button>
+        </form>
+        <form className="memory-form" onSubmit={(event) => { void saveDelegatedSource(event); }}>
+          <strong>{t("knowledge.createTitle")}</strong>
+          <label>{t("knowledge.sourceId")}<input name="sourceId" required placeholder="source:delegated-docs" /></label>
+          <label>{t("knowledge.type")}<select name="sourceType"><option value="google-drive">{t("knowledge.googleDrive")}</option>
+            <option value="github">{t("knowledge.github")}</option></select></label>
+          <label>{t("knowledge.connection")}<select name="connectionId" required>
+            <option value="">—</option>{delegatedConnections.map((connection) =>
+              <option key={display(connection["connectionId"])} value={display(connection["connectionId"])}>
+                {knowledgeProviderLabel(connection["providerId"], t)} · {display(connection["accountLabel"])}</option>)}</select></label>
+          <label>{t("knowledge.resourceIds")}<textarea name="resourceIds" required /></label>
+          <label>{t("knowledge.issuer")}<input name="issuer" type="url" required /></label>
+          <label>{t("knowledge.audience")}<input name="audience" required /></label>
+          <label>{t("knowledge.rule")}<select name="aclRule"><option value="subject:equals">{t("knowledge.subjectEquals")}</option>
+            <option value="subject:in">{t("knowledge.subjectIn")}</option><option value="email:equals">{t("knowledge.emailEquals")}</option>
+            <option value="email:domain">{t("knowledge.emailDomain")}</option><option value="group:in">{t("knowledge.groupIn")}</option></select></label>
+          <label>{t("knowledge.values")}<textarea name="aclValues" required /></label>
+          <label>{t("knowledge.sensitivity")}<select name="sensitivity"><option value="normal">{t("knowledge.normal")}</option>
+            <option value="sensitive">{t("knowledge.sensitive")}</option><option value="secret">{t("knowledge.secret")}</option></select></label>
+          <label className="check"><input name="cloudAllowed" type="checkbox" />{t("knowledge.cloudAllowed")}</label>
+          <label className="check"><input name="cacheEnabled" type="checkbox" />{t("knowledge.cache")}</label>
+          <label>{t("knowledge.cacheTtl")}<input name="cacheTtl" type="number" min="1" max="60" defaultValue="60" /></label>
+          <button disabled={busy || delegatedConnections.length === 0}>{t("knowledge.save")}</button>
+        </form>
+        <section className="cards">{delegatedConnections.map((connection) =>
+          <article key={display(connection["connectionId"])}><div>
+            <strong>{knowledgeProviderLabel(connection["providerId"], t)}</strong>
+            <p>{display(connection["accountLabel"], display(connection["connectionId"]))}</p></div>
+            <button className="danger" disabled={busy}
+              onClick={() => void disconnectDelegatedSource(display(connection["connectionId"]))}>
+              {t("connections.disconnect")}</button></article>)}</section>
+        <section className="cards">{delegatedSources.length === 0 ? <div className="empty"><strong>{t("empty.title")}</strong></div>
+          : delegatedSources.map((source) => <article key={display(source["sourceId"])}><div>
+            <strong>{display(source["sourceId"])}</strong><p>{knowledgeProviderLabel(source["sourceType"], t)} · v{display(source["sourceVersion"])}</p>
+            <small>{t("knowledge.resources")}: {JSON.stringify(source["resourceIds"])}</small>
+            <small>{t("knowledge.cacheState")}: {typeof source["cachePolicy"] === "object" &&
+              source["cachePolicy"] !== null && (source["cachePolicy"] as ApiRecord)["enabled"] === true
+                ? t("knowledge.enabled") : t("knowledge.disabled")}</small></div>
+            <div className="inline-actions"><button disabled={busy}
+              onClick={() => void toggleDelegatedSourceCache(source)}>{t("knowledge.toggleCache")}</button>
+            <button className="danger" disabled={busy} onClick={() => void deleteDelegatedSource(display(source["sourceId"]))}>
+              {t("items.delete")}</button></div></article>)}</section>
+      </>}
       {tab === "tasks" &&
         <>
         <form onSubmit={(event) => { void saveOwnerTimeZone(event); }} className="memory-form compact-form">
@@ -984,7 +1130,7 @@ export function App() {
             </form>
             <pre className="policy">{JSON.stringify(data, null, 2)}</pre>
           </>
-        : tab === "providers"
+          : tab === "providers" || tab === "knowledge"
           ? null
           : <section
               className={`cards${tab === "conversation" ? " conversation-list" : ""}`}

@@ -17,6 +17,18 @@ const bindings = {
   DELEGATED_JWKS_URI: "https://issuer.example/jwks",
   DELEGATED_PRINCIPAL_HMAC_SECRET: "test-secret",
   CONTROL: { fetch: () => Promise.resolve(new Response(null, { status: 404 })) },
+  DELEGATED_SOURCE_READ: { fetch: () => Promise.resolve(new Response(null, { status: 404 })) },
+  DELEGATED_QUOTA: {
+    idFromName: (name: string) => name,
+    get: () => ({ fetch: () => Promise.resolve(Response.json({ status: "ok" })) }),
+  },
+};
+
+const informationPolicy = {
+  deploymentId: "deployment:test", subjectPrincipalIds: ["principal:delegated:allowed"],
+  visibility: "delegated-principal" as const, sensitivity: "normal" as const,
+  trust: "external" as const, allowedAudienceIds: ["principal:delegated:allowed"],
+  allowedDestinationIds: [], retention: { mode: "none" as const },
 };
 
 describe("Delegated Agent API", () => {
@@ -36,9 +48,18 @@ describe("Delegated Agent API", () => {
       authorizeSource: (_sourceId, identity) =>
         Promise.resolve(identity.claims.sub === "allowed" ? {
           sourceId: "source:delegated",
-          sourceType: "drive",
+          sourceType: "google-drive",
           resourceIds: ["file:allowed"],
+          connectionId: "connection:test",
+          sourceVersion: 1,
+          informationPolicy,
+          cachePolicy: { enabled: false, ttlSeconds: 60 },
         } : undefined),
+      sourceFactory: () => ({ kind: "google-drive", search: () => Promise.resolve([{
+        sourceId: "source:delegated", resourceId: "file:allowed", title: "Allowed",
+        uri: "https://example.test/allowed", excerpt: "policy", contentDigest: "a".repeat(64),
+        observedAt: "2026-08-15T00:00:00.000Z", informationPolicy,
+      }]) }),
     });
     const response = await app.request("/v1/query", {
       method: "POST",
