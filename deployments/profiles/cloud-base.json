@@ -1,0 +1,6 @@
+{
+  "id": "cloud-base",
+  "stability": "beta",
+  "workers": ["quota-worker", "audit-ledger-worker", "policy-control-worker", "conversation-agent", "maintenance-worker", "google-gatekeeper", "github-gatekeeper", "discord-gatekeeper", "assistant-worker", "public-agent-api", "delegated-agent-api", "delegated-source-gatekeeper", "discord-adapter"],
+  "features": ["private-r2", "maintenance", "static-plugins", "knowledge-api", "mcp", "discord-interactions"]
+}

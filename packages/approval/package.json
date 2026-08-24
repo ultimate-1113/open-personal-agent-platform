@@ -1,6 +1,6 @@
 {
   "name": "@opap/approval",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "exports": {
@@ -13,6 +13,6 @@
   "dependencies": {
     "@opap/contracts": "workspace:*",
     "@opap/security": "workspace:*",
-    "jose": "^6.1.2"
+    "jose": "^6.2.9"
   }
 }

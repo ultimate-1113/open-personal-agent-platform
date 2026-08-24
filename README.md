@@ -8,8 +8,8 @@ Each deployment belongs to one owner.
 External users are isolated as delegated API principals and never become co-users of the owner's personal assistant.
 
 > [!WARNING]
-> The current release is `v0.1.0-alpha.2`.
-> It contains the Phase 4 Knowledge API implementation, without a production SLA or long-term API compatibility guarantee.
+> The current development line targets `v0.1.0-beta.1`.
+> Cloud Base is beta; Dynamic Plugins, Sandbox Preview, and the Docker Discord Gateway Bridge remain experimental.
 
 ## Available now
 
@@ -33,15 +33,19 @@ External users are isolated as delegated API principals and never become co-user
 - Fixture, static-index, AI Search, Google Drive, and GitHub knowledge adapters
 - OpenAPI 3.1 documents, the typed `@opap/sdk`, and stateless Streamable HTTP MCP
 - An actual `okidev-web` AI Search binding, plus a staging-only public-endpoint compatibility transport
+- Conversation Registry, owner export, deletion propagation, daily audit checkpoints, and retention jobs
+- Build-time Static Plugin registry and an owner-only Dynamic Plugin inspection/runtime path
+- `local-dev`, `minimal`, `cloud-base`, and experimental `cloud-base-dynamic` deployment profiles
+- Cross-platform Docker Compose packaging for the experimental Discord Gateway Bridge
 
 The owner starts setup without an invitation or approval from another person.
 Delegated principals may only read sources explicitly published to them.
 
-## Not implemented yet
+## Scope limits
 
-Dynamic Sandbox plugins and the production deployment profiles remain in Phase 5.
 GitHub code changes, payments, multiple owners, and multi-tenancy are outside the v0.1 scope.
 Gmail sending is available only through an exact-content owner approval.
+The Local AI Router, public Plugin registry, and arbitrary Plugin internet access are not included in beta.1.
 
 ## Security boundaries
 
@@ -63,7 +67,7 @@ Owner data is sent to a cloud provider only when the destination is explicitly p
 
 ## Development
 
-Node.js 24 and pnpm 10 are required.
+Node.js 24 and pnpm 11 are required.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -78,8 +82,12 @@ The normal CI path uses mocks only.
 The standard deployment target is Cloudflare Workers Paid.
 Deployment-specific resource IDs, owner email, Access audience, and Gateway ID belong in generated files under `.wrangler/`, which Git ignores.
 
-See the [Phase 2 staging guide](docs/en/operations/phase-2-staging.md) for the current procedure.
-The code-free Cloud Base profile and complete setup wizard remain v0.1 work.
+Run `pnpm opap setup --profile cloud-base` to review the deployment plan and preflight checks.
+After review, add `--apply` to provision or reuse D1 and R2, back up existing D1 data, apply migrations, register configured secrets, deploy, and run deployment-status checks.
+
+For the guided installer, use `./install.ps1` on Windows or `sh ./install.sh` on macOS and Linux. Add `--apply` only when you are ready to change the selected Cloudflare account.
+Add `--apply` only after resource IDs, secrets, and the migration backup have been reviewed.
+The setup command never changes an existing Access team domain, Tunnel, application, or policy.
 
 ## Cost and privacy
 
@@ -96,6 +104,8 @@ See [resource budgets](docs/en/operations/resource-budgets.md).
 
 ## Documentation
 
+- [Auditing the OPAP Setup Wizard](docs/en/operations/installer-security.md)
+
 - [Architecture](docs/en/architecture/overview.md)
 - [Threat model](docs/en/security/threat-model.md)
 - [Data handling](docs/en/security/data-handling.md)
@@ -104,6 +114,7 @@ See [resource budgets](docs/en/operations/resource-budgets.md).
 - [Phase 3 connectors](docs/en/operations/phase-3-connectors.md)
 - [Phase 4 knowledge APIs](docs/en/operations/phase-4-knowledge.md)
 - [Google and GitHub provider setup](docs/en/operations/connector-provider-setup.md)
+- [Phase 5 operations and plugins](docs/en/operations/phase-5-beta.md)
 - [Localization](docs/en/contributing/localization.md)
 
 ## Security and license

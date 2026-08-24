@@ -49,6 +49,9 @@ type Bindings = {
   GITHUB_GATEKEEPER: Fetcher;
   DISCORD_GATEKEEPER: Fetcher;
   DELEGATED_SOURCE_ADMIN: Fetcher;
+  MAINTENANCE: Fetcher;
+  PLUGIN_RUNTIME?: Fetcher;
+  PLUGIN_INVOCATION_SIGNING_KEY?: string;
   DISCORD_APPLICATION_ID?: string;
   CONVERSATIONS: DurableObjectNamespace;
   OWNER_QUOTA: DurableObjectNamespace;
@@ -61,6 +64,26 @@ type AssistantEnv = {
   Bindings: Bindings;
   Variables: { ownerPrincipalId: string };
 };
+
+const base64Url = (value: Uint8Array): string => btoa(String.fromCharCode(...value))
+  .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+
+const recordRows = (value: unknown): Record<string, unknown>[] => Array.isArray(value)
+  ? value.filter((item): item is Record<string, unknown> =>
+    typeof item === "object" && item !== null && !Array.isArray(item)) : [];
+
+async function issuePluginInvocationToken(input: { installationId: string; toolId: string;
+  requestDigest: string; signingKey: string }): Promise<string> {
+  const payload = base64Url(new TextEncoder().encode(JSON.stringify({
+    installationId: input.installationId, toolId: input.toolId, requestDigest: input.requestDigest,
+    expiresAt: new Date(Date.now() + 2 * 60_000).toISOString(), nonce: crypto.randomUUID(),
+  })));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(input.signingKey),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(payload)));
+  return `${payload}.${base64Url(signature)}`;
+}
 
 type OwnerAuthorization =
   | { outcome: "authorized"; principalId: string }
@@ -156,7 +179,7 @@ class ControlModelSettingsRepository implements ModelSettingsRepository {
 
 const problem = (
   request: Request,
-  status: 400 | 403 | 404 | 409 | 503,
+  status: 400 | 403 | 404 | 409 | 503 | 507,
   title: string,
 ) =>
   Response.json(
@@ -168,6 +191,41 @@ const problem = (
     },
     { status, headers: { "Content-Type": "application/problem+json" } },
   );
+
+const registerConversation = async (input: {
+  bindings: Bindings;
+  principalId: string;
+  conversationId: string;
+  estimatedStorageBytes?: number;
+  registrySource?: "runtime" | "discord-backfill" | "alpha-lazy-backfill";
+}): Promise<boolean> => {
+  const response = await input.bindings.CONTROL.fetch(
+    "https://control.internal/internal/v1/conversations/registry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deploymentId: input.bindings.DEPLOYMENT_ID,
+        conversationId: input.conversationId,
+        principalId: input.principalId,
+        estimatedStorageBytes: input.estimatedStorageBytes ?? 0,
+        registrySource: input.registrySource ?? "runtime",
+      }),
+    },
+  ).catch(() => undefined);
+  return response?.ok === true;
+};
+
+const conversationStorageStatus = async (
+  bindings: Bindings,
+): Promise<"available" | "limit" | "unavailable"> => {
+  const url = new URL("https://control.internal/internal/v1/storage/status");
+  url.searchParams.set("deploymentId", bindings.DEPLOYMENT_ID);
+  const response = await bindings.CONTROL.fetch(url).catch(() => undefined);
+  if (!response?.ok) return "unavailable";
+  const value: unknown = await response.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "unavailable";
+  return (value as Record<string, unknown>)["hardLimitReached"] === true ? "limit" : "available";
+};
 
 type OwnerReservation = {
   quota: DurableObjectStub;
@@ -1586,14 +1644,24 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         const quota = context.env.OWNER_QUOTA.get(
           context.env.OWNER_QUOTA.idFromName(context.env.DEPLOYMENT_ID),
         );
-        const quotaPolicy = await quota.fetch("https://quota.internal/set-ai-policy", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-            action: "set-ai-policy", deploymentId: context.env.DEPLOYMENT_ID,
-            monthlyOverageMicros: updated.ai.monthlyOverageUsd === null ? null
-              : Math.round(updated.ai.monthlyOverageUsd * 1_000_000),
+        const [aiQuotaPolicy, nonAiQuotaPolicy] = await Promise.all([
+          quota.fetch("https://quota.internal/set-ai-policy", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+              action: "set-ai-policy", deploymentId: context.env.DEPLOYMENT_ID,
+              monthlyOverageMicros: updated.ai.monthlyOverageUsd === null ? null
+                : Math.round(updated.ai.monthlyOverageUsd * 1_000_000),
+            }),
           }),
-        });
-        if (!quotaPolicy.ok) return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+          quota.fetch("https://quota.internal/set-non-ai-policy", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+              action: "set-non-ai-policy", deploymentId: context.env.DEPLOYMENT_ID,
+              includedFraction: updated.nonAi.mode === "unlimited" ? null : updated.nonAi.fraction,
+            }),
+          }),
+        ]);
+        if (!aiQuotaPolicy.ok || !nonAiQuotaPolicy.ok) {
+          return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
+        }
       }
       return context.json(updated);
     } catch (error) {
@@ -1714,6 +1782,204 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     return context.json({ imported });
   });
 
+  app.post("/v1/exports", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const response = await context.env.MAINTENANCE.fetch(
+      "https://maintenance.internal/internal/v1/exports", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"), idempotencyKey }),
+      },
+    ).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "MAINTENANCE_UNAVAILABLE");
+  });
+
+  app.get("/v1/exports", async (context) => {
+    const url = new URL("https://maintenance.internal/internal/v1/exports");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const response = await context.env.MAINTENANCE.fetch(url).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "MAINTENANCE_UNAVAILABLE");
+  });
+
+  app.get("/v1/exports/:exportId/files/:fileName", async (context) => {
+    const url = new URL("https://maintenance.internal/internal/v1/exports/file");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    url.searchParams.set("exportId", context.req.param("exportId"));
+    url.searchParams.set("fileName", context.req.param("fileName"));
+    const response = await context.env.MAINTENANCE.fetch(url).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "MAINTENANCE_UNAVAILABLE");
+  });
+
+  app.get("/v1/maintenance/jobs/:jobId", async (context) => {
+    const url = new URL("https://maintenance.internal/internal/v1/maintenance/jobs");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    url.searchParams.set("jobId", context.req.param("jobId"));
+    const response = await context.env.MAINTENANCE.fetch(url).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "MAINTENANCE_UNAVAILABLE");
+  });
+
+  app.get("/v1/plugins", async (context) => {
+    const url = new URL("https://control.internal/internal/v1/plugins");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const response = await context.env.CONTROL.fetch(url).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "PLUGIN_CONTROL_UNAVAILABLE");
+  });
+
+  app.post("/v1/plugins/inspections", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    if (context.req.header("content-type")?.split(";", 1)[0] !== "application/gzip") {
+      return problem(context.req.raw, 400, "PLUGIN_ARCHIVE_CONTENT_TYPE_REQUIRED");
+    }
+    if (!context.env.PLUGIN_RUNTIME) {
+      return problem(context.req.raw, 503, "PLUGIN_RUNTIME_UNAVAILABLE");
+    }
+    const runtime = await context.env.PLUGIN_RUNTIME.fetch(
+      "https://plugin-runtime.internal/internal/v1/plugins/inspect", {
+        method: "POST", headers: { "Content-Type": "application/gzip" },
+        body: context.req.raw.body,
+      },
+    ).catch(() => undefined);
+    if (!runtime) return problem(context.req.raw, 503, "PLUGIN_RUNTIME_UNAVAILABLE");
+    if (!runtime.ok) return new Response(runtime.body, runtime);
+    const inspection: unknown = await runtime.json();
+    const recorded = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/plugins/inspections", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"), requestId: context.req.header("cf-ray") ??
+            crypto.randomUUID(), idempotencyKey, inspection }),
+      },
+    ).catch(() => undefined);
+    return recorded ? new Response(recorded.body, recorded)
+      : problem(context.req.raw, 503, "PLUGIN_CONTROL_UNAVAILABLE");
+  });
+
+  app.post("/v1/plugins", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value) ||
+      typeof (value as Record<string, unknown>)["inspectionId"] !== "string") {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const response = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/plugins/install", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID,
+          principalId: context.get("ownerPrincipalId"), requestId: context.req.header("cf-ray") ??
+            crypto.randomUUID(), idempotencyKey, inspectionId:
+            (value as Record<string, unknown>)["inspectionId"] }),
+      },
+    ).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "PLUGIN_CONTROL_UNAVAILABLE");
+  });
+
+  for (const action of ["versions", "rollback"] as const) {
+    app.post(`/v1/plugins/:installationId/${action}`, async (context) => {
+      const idempotencyKey = context.req.header("idempotency-key");
+      if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+      const value: unknown = await context.req.json().catch(() => null);
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return problem(context.req.raw, 400, "INVALID_REQUEST");
+      }
+      const field = action === "versions" ? "inspectionId" : "versionId";
+      if (typeof (value as Record<string, unknown>)[field] !== "string") {
+        return problem(context.req.raw, 400, "INVALID_REQUEST");
+      }
+      const response = await context.env.CONTROL.fetch(
+        `https://control.internal/internal/v1/plugins/${action === "versions" ? "version" : "rollback"}`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...value as Record<string, unknown>,
+            deploymentId: context.env.DEPLOYMENT_ID,
+            principalId: context.get("ownerPrincipalId"),
+            requestId: context.req.header("cf-ray") ?? crypto.randomUUID(), idempotencyKey,
+            installationId: context.req.param("installationId") }),
+        },
+      ).catch(() => undefined);
+      return response ? new Response(response.body, response)
+        : problem(context.req.raw, 503, "PLUGIN_CONTROL_UNAVAILABLE");
+    });
+  }
+
+  app.post("/v1/plugins/:installationId/invoke", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const value: unknown = await context.req.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value) ||
+      typeof (value as Record<string, unknown>)["toolId"] !== "string") {
+      return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    if (!context.env.PLUGIN_RUNTIME || !context.env.PLUGIN_INVOCATION_SIGNING_KEY) {
+      return problem(context.req.raw, 503, "PLUGIN_RUNTIME_UNAVAILABLE");
+    }
+    const installationId = context.req.param("installationId");
+    const listing = await context.env.CONTROL.fetch(
+      `https://control.internal/internal/v1/plugins?deploymentId=${encodeURIComponent(context.env.DEPLOYMENT_ID)}`,
+    ).catch(() => undefined);
+    const listingValue: unknown = listing?.ok ? await listing.json().catch(() => null) : null;
+    const plugin = typeof listingValue === "object" && listingValue !== null && !Array.isArray(listingValue)
+      ? recordRows((listingValue as Record<string, unknown>)["plugins"]).find((item) =>
+        item["installationId"] === installationId && item["status"] === "active") : undefined;
+    const manifest = plugin && typeof plugin["manifest"] === "object" && plugin["manifest"] !== null &&
+      !Array.isArray(plugin["manifest"]) ? plugin["manifest"] as Record<string, unknown> : undefined;
+    const runtime = manifest && typeof manifest["runtime"] === "object" && manifest["runtime"] !== null &&
+      !Array.isArray(manifest["runtime"]) ? manifest["runtime"] as Record<string, unknown> : undefined;
+    const toolId = String((value as Record<string, unknown>)["toolId"]);
+    if (!plugin || runtime?.["kind"] !== "sandbox-esm" || typeof runtime["entrypoint"] !== "string" ||
+      !Array.isArray(manifest?.["tools"]) || !(manifest["tools"] as unknown[]).some((tool) =>
+        typeof tool === "object" && tool !== null && (tool as Record<string, unknown>)["id"] === toolId)) {
+      return problem(context.req.raw, 404, "PLUGIN_TOOL_NOT_FOUND");
+    }
+    const pluginInput = (value as Record<string, unknown>)["input"] ?? {};
+    const requestDigest = await createRequestDigest(pluginInput as JsonValue);
+    const invocationToken = await issuePluginInvocationToken({ installationId, toolId, requestDigest,
+      signingKey: context.env.PLUGIN_INVOCATION_SIGNING_KEY });
+    const response = await context.env.PLUGIN_RUNTIME.fetch(
+      "https://plugin-runtime.internal/internal/v1/plugins/invoke", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+          deploymentId: context.env.DEPLOYMENT_ID, installationId,
+          archiveSha256: plugin["archiveSha256"], entrypoint: runtime["entrypoint"], toolId,
+          input: pluginInput, invocationToken,
+          protocolVersion: "1",
+          allowedCapabilityIds: Array.isArray(plugin["grantedCapabilityIds"])
+            ? plugin["grantedCapabilityIds"] : [],
+        }) },
+    ).catch(() => undefined);
+    return response ? new Response(response.body, response)
+      : problem(context.req.raw, 503, "PLUGIN_RUNTIME_UNAVAILABLE");
+  });
+
+  for (const method of ["PATCH", "DELETE"] as const) {
+    app.on(method, "/v1/plugins/:installationId", async (context) => {
+      const idempotencyKey = context.req.header("idempotency-key");
+      if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+      const value: unknown = method === "PATCH" ? await context.req.json().catch(() => null) : {};
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return problem(context.req.raw, 400, "INVALID_REQUEST");
+      }
+      const response = await context.env.CONTROL.fetch(
+        "https://control.internal/internal/v1/plugins/installation", {
+          method, headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...value as Record<string, unknown>,
+            deploymentId: context.env.DEPLOYMENT_ID,
+            principalId: context.get("ownerPrincipalId"),
+            requestId: context.req.header("cf-ray") ?? crypto.randomUUID(), idempotencyKey,
+            installationId: context.req.param("installationId") }),
+        },
+      ).catch(() => undefined);
+      return response ? new Response(response.body, response)
+        : problem(context.req.raw, 503, "PLUGIN_CONTROL_UNAVAILABLE");
+    });
+  }
+
   app.post("/v1/conversations", async (context) => {
     const idempotencyKey = context.req.header("idempotency-key");
     if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
@@ -1724,6 +1990,13 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const content = (value as Record<string, unknown>)["content"];
     if (content !== undefined && (typeof content !== "string" || content.length > 32_768)) {
       return problem(context.req.raw, 400, "INVALID_REQUEST");
+    }
+    const storageStatus = await conversationStorageStatus(context.env);
+    if (storageStatus === "limit") {
+      return problem(context.req.raw, 507, "STORAGE_BUDGET_REACHED");
+    }
+    if (storageStatus === "unavailable") {
+      return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
     }
     const principalId = context.get("ownerPrincipalId");
     const digest = await sha256Hex(`${context.env.DEPLOYMENT_ID}\u0000${idempotencyKey}`);
@@ -1761,6 +2034,17 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       await releaseReservation(reservation, context.env.DEPLOYMENT_ID);
       return new Response(created.body, created);
     }
+    const metadataResponse = await conversation.fetch("https://conversation.internal/metadata")
+      .catch(() => undefined);
+    const metadata = metadataResponse ? await metadataResponse.json().catch(() => null) : null;
+    const estimatedStorageBytes = typeof metadata === "object" && metadata !== null &&
+      !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>)["databaseSizeBytes"] === "number"
+      ? Number((metadata as Record<string, unknown>)["databaseSizeBytes"]) : 0;
+    if (!await registerConversation({ bindings: context.env, principalId, conversationId,
+      estimatedStorageBytes, registrySource: "runtime" })) {
+      await releaseReservation(reservation, context.env.DEPLOYMENT_ID);
+      return problem(context.req.raw, 503, "CONVERSATION_REGISTRY_UNAVAILABLE");
+    }
     if (!await settleOwnerOperation(reservation, context.env.DEPLOYMENT_ID)) {
       return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
     }
@@ -1779,10 +2063,48 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
       context.env.CONVERSATIONS.idFromName(conversationId),
     );
     const response = await conversation.fetch("https://conversation.internal/state");
+    if (response.ok) {
+      const metadataResponse = await conversation.fetch("https://conversation.internal/metadata")
+        .catch(() => undefined);
+      const metadata = metadataResponse ? await metadataResponse.json().catch(() => null) : null;
+      const estimatedStorageBytes = typeof metadata === "object" && metadata !== null &&
+        !Array.isArray(metadata) && typeof (metadata as Record<string, unknown>)["databaseSizeBytes"] === "number"
+        ? Number((metadata as Record<string, unknown>)["databaseSizeBytes"]) : 0;
+      await registerConversation({ bindings: context.env,
+        principalId: context.get("ownerPrincipalId"), conversationId, estimatedStorageBytes,
+        registrySource: "alpha-lazy-backfill" });
+    }
     return new Response(response.body, {
       status: response.status,
       headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
     });
+  });
+
+  app.delete("/v1/conversations/:conversationId", async (context) => {
+    const idempotencyKey = context.req.header("idempotency-key");
+    if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
+    const conversationId = context.req.param("conversationId");
+    if (!/^conversation:[a-f0-9]{64}$/u.test(conversationId)) {
+      return problem(context.req.raw, 404, "NOT_FOUND");
+    }
+    const principalId = context.get("ownerPrincipalId");
+    const stub = context.env.CONVERSATIONS.get(context.env.CONVERSATIONS.idFromName(conversationId));
+    const deleted = await stub.fetch("https://conversation.internal/delete", { method: "DELETE" })
+      .catch(() => undefined);
+    if (deleted && !deleted.ok && deleted.status !== 404) {
+      return problem(context.req.raw, 503, "CONVERSATION_UNAVAILABLE");
+    }
+    const marked = await context.env.CONTROL.fetch(
+      "https://control.internal/internal/v1/conversations/registry", {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deploymentId: context.env.DEPLOYMENT_ID, conversationId,
+          principalId }),
+      },
+    ).catch(() => undefined);
+    if (!marked?.ok && marked?.status !== 404) {
+      return problem(context.req.raw, 503, "CONVERSATION_REGISTRY_UNAVAILABLE");
+    }
+    return context.json({ conversationId, deleted: true });
   });
 
   app.post("/v1/conversations/:conversationId/messages", async (context) => {
@@ -1798,6 +2120,13 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const conversationId = context.req.param("conversationId");
     if (!/^conversation:[a-f0-9]{64}$/u.test(conversationId)) {
       return problem(context.req.raw, 404, "NOT_FOUND");
+    }
+    const storageStatus = await conversationStorageStatus(context.env);
+    if (storageStatus === "limit") {
+      return problem(context.req.raw, 507, "STORAGE_BUDGET_REACHED");
+    }
+    if (storageStatus === "unavailable") {
+      return problem(context.req.raw, 503, "METERING_UNAVAILABLE");
     }
     const principalId = context.get("ownerPrincipalId");
     const stub = context.env.CONVERSATIONS.get(
@@ -2460,8 +2789,13 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     if (typeof approvalResult !== "object" || approvalResult === null ||
       Array.isArray(approvalResult)) return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
     const approved = approvalResult as Record<string, unknown>;
-    if (typeof approved["capabilityId"] !== "string" ||
-      typeof approved["executionRequest"] !== "object" || approved["executionRequest"] === null) {
+    if (typeof approved["capabilityId"] !== "string") {
+      return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
+    }
+    if (approved["capabilityId"] === "plugin.capabilities.grant") {
+      return context.json(approved);
+    }
+    if (typeof approved["executionRequest"] !== "object" || approved["executionRequest"] === null) {
       return problem(context.req.raw, 503, "APPROVAL_EXECUTION_UNAVAILABLE");
     }
     if (decision === "rejected") {

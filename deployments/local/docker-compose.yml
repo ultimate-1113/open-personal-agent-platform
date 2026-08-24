@@ -1,0 +1,38 @@
+name: opap-local
+services:
+  discord-gateway-bridge:
+    profiles: ["discord-bridge"]
+    build:
+      context: ../..
+      dockerfile: apps/discord-gateway-bridge/Dockerfile
+    image: opap/discord-gateway-bridge:0.1.0-beta.1
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    volumes:
+      - discord-bridge-state:/state
+    environment:
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN}
+      DISCORD_BRIDGE_SIGNING_KEY: ${DISCORD_BRIDGE_SIGNING_KEY:?set DISCORD_BRIDGE_SIGNING_KEY}
+      DISCORD_ADAPTER_URL: ${DISCORD_ADAPTER_URL:?set DISCORD_ADAPTER_URL}
+      DEPLOYMENT_ID: ${DEPLOYMENT_ID:-deployment:default}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [opap-local]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9464/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  opap-local:
+    name: opap-local
+
+volumes:
+  discord-bridge-state:

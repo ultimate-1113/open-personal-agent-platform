@@ -1,0 +1,46 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "opap-plugin-runtime",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "vars": {
+    "PLUGIN_RUNTIME_PROTOCOL_VERSION": "1",
+    "DEPLOYMENT_ID": "deployment:default"
+  },
+  "r2_buckets": [
+    { "binding": "PRIVATE_R2", "bucket_name": "opap-private-development" }
+  ],
+  "services": [
+    { "binding": "CONTROL", "service": "opap-policy-control" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SANDBOX",
+        "class_name": "Sandbox"
+      },
+      {
+        "name": "PLUGIN_COORDINATOR",
+        "class_name": "PluginCoordinator"
+      },
+      {
+        "name": "QUOTA",
+        "class_name": "QuotaDurableObject",
+        "script_name": "opap-quota"
+      }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PluginCoordinator", "Sandbox"] }
+  ],
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "max_instances": 2,
+      "instance_type": "lite"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "@opap/gatekeeper-sdk",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "exports": {
@@ -13,6 +13,6 @@
   "dependencies": {
     "@opap/approval": "workspace:*",
     "@opap/contracts": "workspace:*",
-    "jose": "^6.1.3"
+    "jose": "^6.2.9"
   }
 }

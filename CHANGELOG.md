@@ -2,6 +2,29 @@
 
 All notable changes to Open Personal Agent Platform are documented here.
 
+## [0.1.0-beta.1] - 2026-08-20
+
+### Added
+
+- Conversation Registry with lazy alpha backfill, Durable Object schema versions, owner export, and conversation deletion.
+- Daily Audit Ledger checkpoints in Private R2 and checkpoint-gated retention.
+- Static Plugin build registry and fixture, Dynamic Plugin archive inspection, version approval, rollback, and isolated Sandbox runtime.
+- Container memory, CPU, and disk reservations with deployment-wide concurrency and safety limits.
+- `local-dev`, `minimal`, `cloud-base`, and experimental `cloud-base-dynamic` deployment profiles with the `opap setup` preflight.
+- A hardened multi-architecture Docker Compose package for the experimental Discord Gateway Bridge.
+
+### Changed
+
+- Updated direct dependencies to the 2026-08-20 stable releases and centralized Wrangler 4.124.0 and Workers runtime types at the workspace root. TypeScript remains on the latest 5.x release supported by `typescript-eslint` 8.67.0, and Node declarations remain on the Node.js 24 LTS line.
+- Raised the minimum package manager to pnpm 11.22.0 while retaining Node.js 24 LTS.
+- Defined the Plugin manifest artifact digest as the ESM bundle digest and stored the archive digest separately.
+
+### Stability
+
+- Cloud Base, Static Plugins, export, deletion, retention, and setup preflight are beta features.
+- Dynamic Plugins, Sandbox Preview, Cloud Base Dynamic, and the Docker Discord Gateway Bridge remain experimental.
+- Local AI Router and the Ollama Adapter remain outside this release.
+
 ## [0.1.0-alpha.1] - 2026-08-13
 
 ### Added

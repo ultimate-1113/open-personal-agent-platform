@@ -1,0 +1,7 @@
+{
+  "id": "cloud-base-dynamic",
+  "extends": "cloud-base",
+  "stability": "experimental",
+  "workers": ["plugin-runtime-worker"],
+  "features": ["dynamic-plugins", "sandbox-preview"]
+}

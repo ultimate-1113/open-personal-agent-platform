@@ -5,9 +5,24 @@ const DOWNSTREAM_LIMITS = {
   "delegated-query": 100_000,
   "delegated-subject": 500,
   "owner-stateful-operation": 50_000,
+  "container-memory-gib-hour": PRICE_CATALOG.included["container-memory-gib-hour"] * 0.8,
+  "container-cpu-vcpu-minute": PRICE_CATALOG.included["container-cpu-vcpu-minute"] * 0.8,
+  "container-disk-gb-hour": PRICE_CATALOG.included["container-disk-gb-hour"] * 0.8,
+  "durable-object-storage-gb-month": PRICE_CATALOG.included["durable-object-storage-gb-month"] * 0.8,
+  "d1-storage-gb-month": PRICE_CATALOG.included["d1-storage-gb-month"] * 0.8,
+  "r2-storage-gb-month": PRICE_CATALOG.included["r2-storage-gb-month"] * 0.8,
 } as const;
 
 type DownstreamResource = keyof typeof DOWNSTREAM_LIMITS;
+
+const INCLUDED_METER_RESOURCES = new Set<DownstreamResource>([
+  "container-memory-gib-hour",
+  "container-cpu-vcpu-minute",
+  "container-disk-gb-hour",
+  "durable-object-storage-gb-month",
+  "d1-storage-gb-month",
+  "r2-storage-gb-month",
+]);
 
 type ReserveRequest = {
   action: "reserve";
@@ -76,6 +91,8 @@ type AiSettleRequest = {
 };
 type SetAiPolicyRequest = { action: "set-ai-policy"; deploymentId: string;
   monthlyOverageMicros: number | null };
+type SetNonAiPolicyRequest = { action: "set-non-ai-policy"; deploymentId: string;
+  includedFraction: number | null };
 type ImportLegacyRequest = { action: "import-legacy"; deploymentId: string; sourceShard: string;
   usage: { scopeId: string; period: string; resource: string; used: number }[];
   aiDaily: { day: string; usedNeurons: number }[];
@@ -83,7 +100,8 @@ type ImportLegacyRequest = { action: "import-legacy"; deploymentId: string; sour
 
 type QuotaRequest = ReserveRequest | BatchReserveRequest | BatchSettleRequest |
   BatchReleaseRequest | SettleRequest | ReleaseRequest |
-  AiReserveRequest | AiSettleRequest | SetAiPolicyRequest | ImportLegacyRequest;
+  AiReserveRequest | AiSettleRequest | SetAiPolicyRequest | SetNonAiPolicyRequest |
+  ImportLegacyRequest;
 
 type ReservationRow = {
   reservation_id: string;
@@ -190,6 +208,11 @@ export class QuotaDurableObject {
         monthly_overage_micros REAL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS non_ai_budget_policies (
+        deployment_id TEXT PRIMARY KEY,
+        included_fraction REAL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS legacy_import_markers (
         deployment_id TEXT NOT NULL,
         source_shard TEXT NOT NULL,
@@ -223,6 +246,7 @@ export class QuotaDurableObject {
     if (input.action === "reserve-ai") return this.#reserveAi(input);
     if (input.action === "settle-ai") return this.#settleAi(input);
     if (input.action === "set-ai-policy") return this.#setAiPolicy(input);
+    if (input.action === "set-non-ai-policy") return this.#setNonAiPolicy(input);
     if (input.action === "import-legacy") return this.#importLegacy(input);
     return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
   }
@@ -276,7 +300,8 @@ export class QuotaDurableObject {
         input.resource,
       ));
     if (!usage) return Response.json({ code: "METERING_UNAVAILABLE" }, { status: 503 });
-    if (usage.used + usage.reserved + input.amount > DOWNSTREAM_LIMITS[input.resource]) {
+    const hardLimit = this.#hardLimit(input.deploymentId, input.resource);
+    if (hardLimit !== null && usage.used + usage.reserved + input.amount > hardLimit) {
       return Response.json({ code: "BUDGET_HARD_LIMIT_REACHED" }, { status: 429 });
     }
     this.#state.storage.sql.exec(
@@ -351,7 +376,8 @@ export class QuotaDurableObject {
       if (!usage) return Response.json({ code: "METERING_UNAVAILABLE" }, { status: 503 });
       const key = `${item.scopeId}\u0000${item.period}\u0000${item.resource}`;
       const next = (projected.get(key) ?? usage.used + usage.reserved) + item.amount;
-      if (next > DOWNSTREAM_LIMITS[item.resource]) {
+      const hardLimit = this.#hardLimit(input.deploymentId, item.resource);
+      if (hardLimit !== null && next > hardLimit) {
         return Response.json({ code: "BUDGET_HARD_LIMIT_REACHED" }, { status: 429 });
       }
       projected.set(key, next);
@@ -628,6 +654,32 @@ export class QuotaDurableObject {
     return Response.json({ monthlyOverageMicros: input.monthlyOverageMicros });
   }
 
+  #setNonAiPolicy(input: SetNonAiPolicyRequest): Response {
+    if (!input.deploymentId || (input.includedFraction !== null &&
+      (!Number.isFinite(input.includedFraction) || input.includedFraction < 0.1 ||
+        input.includedFraction > 1))) {
+      return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    this.#state.storage.sql.exec(
+      `INSERT INTO non_ai_budget_policies (deployment_id, included_fraction, updated_at)
+       VALUES (?, ?, ?) ON CONFLICT(deployment_id) DO UPDATE SET
+       included_fraction = excluded.included_fraction, updated_at = excluded.updated_at`,
+      input.deploymentId, input.includedFraction, new Date().toISOString(),
+    );
+    return Response.json({ includedFraction: input.includedFraction });
+  }
+
+  #hardLimit(deploymentId: string, resource: DownstreamResource): number | null {
+    if (!INCLUDED_METER_RESOURCES.has(resource)) return DOWNSTREAM_LIMITS[resource];
+    const policy = firstRow(this.#state.storage.sql.exec<{ included_fraction: number | null }>(
+      "SELECT included_fraction FROM non_ai_budget_policies WHERE deployment_id = ?",
+      deploymentId,
+    ));
+    if (policy && policy.included_fraction === null) return null;
+    const fraction = policy?.included_fraction ?? 0.8;
+    return DOWNSTREAM_LIMITS[resource] * fraction / 0.8;
+  }
+
   #exportLegacy(request: Request): Response {
     const deploymentId = new URL(request.url).searchParams.get("deploymentId");
     if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
@@ -846,14 +898,16 @@ export class QuotaDurableObject {
       scopeId,
       period,
     )].map((record) => {
-      const hardLimit = DOWNSTREAM_LIMITS[record.resource];
+      const hardLimit = this.#hardLimit(deploymentId, record.resource);
       const projected = record.used + record.reserved;
       return {
         resource: record.resource,
         used: record.used,
         reserved: record.reserved,
         hardLimit,
-        mode: projected >= hardLimit ? "blocked" : projected >= hardLimit * 0.75 ? "degraded" : "normal",
+        mode: hardLimit === null ? "normal"
+          : projected >= hardLimit ? "blocked"
+          : projected >= hardLimit * 0.75 ? "degraded" : "normal",
         updatedAt: record.updated_at,
       };
     });

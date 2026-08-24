@@ -1,0 +1,18 @@
+{
+  "name": "@opap/setup-engine",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./archive": "./src/archive.ts",
+    "./github-manifest": "./src/github-manifest.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

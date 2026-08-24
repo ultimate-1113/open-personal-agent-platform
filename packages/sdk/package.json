@@ -1,10 +1,26 @@
 {
   "name": "@opap/sdk",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-beta.1",
   "type": "module",
-  "exports": { ".": { "types": "./src/index.ts", "import": "./dist/index.js" } },
-  "files": ["dist"],
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run" },
-  "dependencies": { "@opap/contracts": "workspace:*" },
-  "devDependencies": { "typescript": "^5.9.3", "vitest": "^4.0.18" }
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opap/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
 }

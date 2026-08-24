@@ -10,6 +10,7 @@ import {
   modelProviderSettingSchema,
   normalizeTimeZone,
   ownerModelSettingsSchema,
+  pluginManifestSchema,
   type ModelProviderSetting,
   type JsonValue,
 } from "@opap/contracts";
@@ -73,6 +74,14 @@ type ProviderSettingRow = {
   last_idempotency_key: string | null;
   last_update_fingerprint: string | null;
   updated_at: string;
+};
+
+type ConversationRegistryInput = {
+  deploymentId: string;
+  conversationId: string;
+  principalId: string;
+  estimatedStorageBytes?: number;
+  registrySource?: "runtime" | "discord-backfill" | "alpha-lazy-backfill";
 };
 
 const audit = async (
@@ -457,7 +466,8 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     (input["gatekeeperId"] !== "gatekeeper:google-personal" &&
       input["gatekeeperId"] !== "gatekeeper:github-personal" &&
       input["gatekeeperId"] !== "gatekeeper:model-router" &&
-      input["gatekeeperId"] !== "gatekeeper:discord") ||
+      input["gatekeeperId"] !== "gatekeeper:discord" &&
+      input["gatekeeperId"] !== "gatekeeper:plugin-control") ||
     typeof input["requestId"] !== "string"
     || typeof input["idempotencyKey"] !== "string"
   ) {
@@ -471,11 +481,14 @@ async function createApproval(request: Request, env: Bindings): Promise<Response
     input["capabilityId"] !== "model.connector-results.send" &&
     input["capabilityId"] !== "discord.notification-destinations.configure" &&
     input["capabilityId"] !== "discord.notification-policy.update" &&
-    input["capabilityId"] !== "discord.notifications.deliver") {
+    input["capabilityId"] !== "discord.notifications.deliver" &&
+    input["capabilityId"] !== "plugin.capabilities.grant") {
     return Response.json({ code: "CAPABILITY_NOT_ALLOWED" }, { status: 403 });
   }
   const expectedGatekeeper = String(input["capabilityId"]).startsWith("github.")
     ? "gatekeeper:github-personal"
+    : input["capabilityId"] === "plugin.capabilities.grant"
+      ? "gatekeeper:plugin-control"
     : String(input["capabilityId"]).startsWith("discord.")
       ? "gatekeeper:discord"
     : input["capabilityId"] === "model.connector-results.send"
@@ -743,6 +756,47 @@ async function decideApproval(request: Request, env: Bindings): Promise<Response
     return Response.json(current.capability_id === "model.connector-results.send" && current.request_json
       ? { ...decided, executionRequest: JSON.parse(current.request_json) as JsonValue }
       : decided);
+  }
+  if (current.capability_id === "plugin.capabilities.grant") {
+    if (!current.request_json) {
+      return Response.json({ code: "APPROVAL_EXECUTION_DATA_MISSING" }, { status: 503 });
+    }
+    const pluginRequest = JSON.parse(current.request_json) as Record<string, unknown>;
+    if (typeof pluginRequest["installationId"] !== "string" ||
+      typeof pluginRequest["versionId"] !== "string") {
+      return Response.json({ code: "APPROVAL_EXECUTION_DATA_INVALID" }, { status: 503 });
+    }
+    const version = await env.CONTROL_DB.prepare(
+      `SELECT manifest_json, plugin_version, archive_sha256, requested_capability_ids_json
+       FROM plugin_versions WHERE deployment_id = ? AND installation_id = ? AND version_id = ?
+         AND status = 'pending-approval'`,
+    ).bind(input["deploymentId"], pluginRequest["installationId"],
+      pluginRequest["versionId"]).first<{ manifest_json: string; plugin_version: string;
+        archive_sha256: string; requested_capability_ids_json: string }>();
+    if (!version) return Response.json({ code: "PLUGIN_VERSION_NOT_PENDING" }, { status: 409 });
+    await env.CONTROL_DB.batch([
+      env.CONTROL_DB.prepare(
+        `UPDATE plugin_versions SET status = 'superseded'
+         WHERE deployment_id = ? AND installation_id = ? AND status = 'active'`,
+      ).bind(input["deploymentId"], pluginRequest["installationId"]),
+      env.CONTROL_DB.prepare(
+        `UPDATE plugin_versions SET status = 'active', activated_at = ?
+         WHERE deployment_id = ? AND version_id = ?`,
+      ).bind(now, input["deploymentId"], pluginRequest["versionId"]),
+      env.CONTROL_DB.prepare(
+        `UPDATE plugin_installations SET plugin_version = ?, artifact_sha256 = ?, manifest_json = ?,
+           granted_capability_ids_json = ?, active_version_id = ?, status = 'active', updated_at = ?
+         WHERE deployment_id = ? AND installation_id = ? AND status != 'removed'`,
+      ).bind(version.plugin_version, version.archive_sha256, version.manifest_json,
+        version.requested_capability_ids_json, pluginRequest["versionId"], now,
+        input["deploymentId"], pluginRequest["installationId"]),
+      env.CONTROL_DB.prepare(
+        `UPDATE approvals SET execution_status = 'succeeded', executed_at = ?
+         WHERE deployment_id = ? AND approval_id = ?`,
+      ).bind(now, input["deploymentId"], current.approval_id),
+    ]);
+    return Response.json({ ...decided, executionStatus: "succeeded",
+      installationId: pluginRequest["installationId"], versionId: pluginRequest["versionId"] });
   }
   if (!current.request_json || !current.task_id || !current.gatekeeper_id) {
     return Response.json({ code: "APPROVAL_EXECUTION_DATA_MISSING" }, { status: 503 });
@@ -1099,6 +1153,464 @@ async function ownerPreferences(request: Request, env: Bindings): Promise<Respon
   return Response.json({ timeZone, updatedAt: now });
 }
 
+const isConversationRegistryInput = (value: unknown): value is ConversationRegistryInput => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  return typeof input["deploymentId"] === "string" &&
+    typeof input["conversationId"] === "string" &&
+    /^conversation:[a-f0-9]{64}$/u.test(input["conversationId"]) &&
+    typeof input["principalId"] === "string" &&
+    (input["estimatedStorageBytes"] === undefined ||
+      (typeof input["estimatedStorageBytes"] === "number" &&
+        Number.isSafeInteger(input["estimatedStorageBytes"]) && input["estimatedStorageBytes"] >= 0)) &&
+    (input["registrySource"] === undefined || input["registrySource"] === "runtime" ||
+      input["registrySource"] === "discord-backfill" ||
+      input["registrySource"] === "alpha-lazy-backfill");
+};
+
+async function conversationRegistry(request: Request, env: Bindings): Promise<Response> {
+  const url = new URL(request.url);
+  if (request.method === "GET") {
+    const deploymentId = url.searchParams.get("deploymentId");
+    if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    const rows = await env.CONTROL_DB.prepare(
+      `SELECT conversation_id, owner_principal_id, created_at, last_used_at,
+              estimated_storage_bytes, deleted_at, registry_source
+       FROM conversation_registry WHERE deployment_id = ?
+       ORDER BY last_used_at DESC LIMIT 1000`,
+    ).bind(deploymentId).all<{
+      conversation_id: string; owner_principal_id: string; created_at: string; last_used_at: string;
+      estimated_storage_bytes: number; deleted_at: string | null; registry_source: string;
+    }>();
+    return Response.json({ conversations: rows.results.map((row) => ({
+      conversationId: row.conversation_id,
+      principalId: row.owner_principal_id,
+      createdAt: row.created_at,
+      lastUsedAt: row.last_used_at,
+      estimatedStorageBytes: row.estimated_storage_bytes,
+      deletedAt: row.deleted_at,
+      registrySource: row.registry_source,
+    })) });
+  }
+  const value: unknown = await request.json().catch(() => null);
+  if (!isConversationRegistryInput(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  if (request.method === "DELETE") {
+    const updated = await env.CONTROL_DB.prepare(
+      `UPDATE conversation_registry SET deleted_at = COALESCE(deleted_at, ?), last_used_at = ?
+       WHERE deployment_id = ? AND conversation_id = ? AND owner_principal_id = ?`,
+    ).bind(now, now, value.deploymentId, value.conversationId, value.principalId).run();
+    return updated.meta.changes === 1
+      ? Response.json({ conversationId: value.conversationId, deletedAt: now })
+      : Response.json({ code: "NOT_FOUND" }, { status: 404 });
+  }
+  await env.CONTROL_DB.prepare(
+    `INSERT INTO conversation_registry
+     (deployment_id, conversation_id, owner_principal_id, created_at, last_used_at,
+      estimated_storage_bytes, deleted_at, registry_source)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+     ON CONFLICT(deployment_id, conversation_id) DO UPDATE SET
+       last_used_at = excluded.last_used_at,
+       estimated_storage_bytes = MAX(conversation_registry.estimated_storage_bytes,
+                                     excluded.estimated_storage_bytes),
+       registry_source = CASE WHEN conversation_registry.registry_source = 'runtime'
+         THEN conversation_registry.registry_source ELSE excluded.registry_source END`,
+  ).bind(value.deploymentId, value.conversationId, value.principalId, now, now,
+    value.estimatedStorageBytes ?? 0, value.registrySource ?? "runtime").run();
+  return Response.json({ conversationId: value.conversationId, registeredAt: now }, { status: 201 });
+}
+
+async function conversationStorageStatus(request: Request, env: Bindings): Promise<Response> {
+  const deploymentId = new URL(request.url).searchParams.get("deploymentId");
+  if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  const row = await env.CONTROL_DB.prepare(
+    `SELECT COALESCE(SUM(estimated_storage_bytes), 0) AS used_bytes
+     FROM conversation_registry WHERE deployment_id = ? AND deleted_at IS NULL`,
+  ).bind(deploymentId).first<{ used_bytes: number }>();
+  const usedBytes = Number(row?.used_bytes ?? 0);
+  const hardLimitBytes = 4 * 1024 * 1024 * 1024;
+  return Response.json({ resource: "durable-object-sqlite", usedBytes, hardLimitBytes,
+    hardLimitReached: usedBytes >= hardLimitBytes });
+}
+
+const pluginMutationInput = async (request: Request): Promise<Record<string, unknown> | undefined> => {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  return typeof input["deploymentId"] === "string" && typeof input["principalId"] === "string" &&
+    typeof input["requestId"] === "string" && typeof input["idempotencyKey"] === "string"
+    ? input : undefined;
+};
+
+async function listPlugins(request: Request, env: Bindings): Promise<Response> {
+  const deploymentId = new URL(request.url).searchParams.get("deploymentId");
+  if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  const rows = await env.CONTROL_DB.prepare(
+    `SELECT i.installation_id, i.plugin_id, i.plugin_version, i.artifact_sha256,
+            i.manifest_json, i.granted_capability_ids_json, i.status, i.active_version_id,
+            i.created_at, i.updated_at, i.removed_at
+     FROM plugin_installations i WHERE i.deployment_id = ? ORDER BY i.created_at DESC`,
+  ).bind(deploymentId).all<{
+    installation_id: string; plugin_id: string; plugin_version: string; artifact_sha256: string;
+    manifest_json: string; granted_capability_ids_json: string; status: string;
+    active_version_id: string | null; created_at: string; updated_at: string; removed_at: string | null;
+  }>();
+  const versions = await env.CONTROL_DB.prepare(
+    `SELECT version_id, installation_id, plugin_version, archive_sha256,
+            requested_capability_ids_json, status, created_at, activated_at
+     FROM plugin_versions WHERE deployment_id = ? ORDER BY created_at DESC`,
+  ).bind(deploymentId).all<{ version_id: string; installation_id: string; plugin_version: string;
+    archive_sha256: string; requested_capability_ids_json: string; status: string;
+    created_at: string; activated_at: string | null }>();
+  return Response.json({ plugins: rows.results.map((row) => ({
+    installationId: row.installation_id, pluginId: row.plugin_id, version: row.plugin_version,
+    archiveSha256: row.artifact_sha256, manifest: JSON.parse(row.manifest_json) as unknown,
+    grantedCapabilityIds: JSON.parse(row.granted_capability_ids_json) as unknown,
+    status: row.status, activeVersionId: row.active_version_id, createdAt: row.created_at,
+    updatedAt: row.updated_at, removedAt: row.removed_at,
+    versions: versions.results.filter((version) => version.installation_id === row.installation_id)
+      .map((version) => ({ versionId: version.version_id, version: version.plugin_version,
+        archiveSha256: version.archive_sha256,
+        requestedCapabilityIds: JSON.parse(version.requested_capability_ids_json) as unknown,
+        status: version.status, createdAt: version.created_at, activatedAt: version.activated_at })),
+  })) });
+}
+
+async function recordPluginInspection(request: Request, env: Bindings): Promise<Response> {
+  const input = await pluginMutationInput(request);
+  const inspection = input?.["inspection"];
+  if (!input || typeof inspection !== "object" || inspection === null || Array.isArray(inspection)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const row = inspection as Record<string, unknown>;
+  const manifest = pluginManifestSchema.safeParse(row["manifest"]);
+  if (!manifest.success || typeof row["archiveSha256"] !== "string" ||
+    typeof row["bundleSha256"] !== "string" || typeof row["r2ObjectKey"] !== "string" ||
+    typeof row["expandedBytes"] !== "number" || typeof row["entryCount"] !== "number" ||
+    (row["sbomVersion"] !== "1.5" && row["sbomVersion"] !== "1.6")) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const inspectionId = `plugin-inspection:${crypto.randomUUID()}`;
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1_000).toISOString();
+  await env.CONTROL_DB.batch([
+    env.CONTROL_DB.prepare(
+      `INSERT OR IGNORE INTO plugin_artifacts
+       (deployment_id, archive_sha256, bundle_sha256, r2_object_key, compressed_bytes,
+        expanded_bytes, entry_count, sbom_version, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(input["deploymentId"], row["archiveSha256"], row["bundleSha256"], row["r2ObjectKey"],
+      Number(row["compressedBytes"] ?? 0), row["expandedBytes"], row["entryCount"],
+      row["sbomVersion"], now.toISOString()),
+    env.CONTROL_DB.prepare(
+      `INSERT INTO plugin_inspections
+       (deployment_id, inspection_id, archive_sha256, manifest_json, status, created_at, expires_at)
+       VALUES (?, ?, ?, ?, 'accepted', ?, ?)`,
+    ).bind(input["deploymentId"], inspectionId, row["archiveSha256"],
+      JSON.stringify(manifest.data), now.toISOString(), expiresAt),
+  ]);
+  const audited = await audit(env, { deploymentId: String(input["deploymentId"]),
+    principalId: String(input["principalId"]), eventType: "plugin.inspected", outcome: "success",
+    requestId: String(input["requestId"]), metadata: { inspectionId, pluginId: manifest.data.id,
+      archiveSha256: row["archiveSha256"] },
+  });
+  return audited ? Response.json({ inspectionId, manifest: manifest.data,
+    archiveSha256: row["archiveSha256"], expiresAt }, { status: 201 })
+    : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+}
+
+async function installPlugin(request: Request, env: Bindings): Promise<Response> {
+  const input = await pluginMutationInput(request);
+  if (!input || typeof input["inspectionId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const inspection = await env.CONTROL_DB.prepare(
+    `SELECT p.archive_sha256, p.manifest_json, p.expires_at, a.r2_object_key
+     FROM plugin_inspections p JOIN plugin_artifacts a
+       ON a.deployment_id = p.deployment_id AND a.archive_sha256 = p.archive_sha256
+     WHERE p.deployment_id = ? AND p.inspection_id = ? AND p.status = 'accepted'`,
+  ).bind(input["deploymentId"], input["inspectionId"]).first<{
+    archive_sha256: string; manifest_json: string; expires_at: string; r2_object_key: string;
+  }>();
+  if (!inspection || Date.parse(inspection.expires_at) <= Date.now()) {
+    return Response.json({ code: "PLUGIN_INSPECTION_EXPIRED" }, { status: 409 });
+  }
+  const manifest = pluginManifestSchema.parse(JSON.parse(inspection.manifest_json) as unknown);
+  const replay = await env.CONTROL_DB.prepare(
+    `SELECT installation_id, manifest_json FROM plugin_installations
+     WHERE deployment_id = ? AND last_idempotency_key = ?`,
+  ).bind(input["deploymentId"], input["idempotencyKey"]).first<{
+    installation_id: string; manifest_json: string;
+  }>().catch(() => null);
+  if (replay) return Response.json({ installationId: replay.installation_id,
+    manifest: JSON.parse(replay.manifest_json) as unknown });
+  const installationId = `plugin-installation:${crypto.randomUUID()}`;
+  const versionId = `plugin-version:${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  const needsCapabilityApproval = manifest.requestedCapabilityIds.length > 0;
+  await env.CONTROL_DB.batch([
+    env.CONTROL_DB.prepare(
+      `INSERT INTO plugin_installations
+       (deployment_id, installation_id, plugin_id, plugin_version, artifact_sha256,
+        manifest_json, granted_capability_ids_json, status, created_at, updated_at,
+        active_version_id, last_idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(input["deploymentId"], installationId, manifest.id, manifest.version,
+      inspection.archive_sha256, JSON.stringify(manifest),
+      JSON.stringify(needsCapabilityApproval ? [] : manifest.requestedCapabilityIds),
+      needsCapabilityApproval ? "disabled" : "active", now, now,
+      needsCapabilityApproval ? null : versionId, input["idempotencyKey"]),
+    env.CONTROL_DB.prepare(
+      `INSERT INTO plugin_versions
+       (deployment_id, version_id, installation_id, plugin_id, plugin_version,
+        archive_sha256, manifest_json, requested_capability_ids_json, status, created_at, activated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(input["deploymentId"], versionId, installationId, manifest.id, manifest.version,
+      inspection.archive_sha256, JSON.stringify(manifest),
+      JSON.stringify(manifest.requestedCapabilityIds),
+      needsCapabilityApproval ? "pending-approval" : "active", now,
+      needsCapabilityApproval ? null : now),
+  ]);
+  if (needsCapabilityApproval) {
+    const approvalRequest = { installationId, versionId,
+      addedCapabilityIds: manifest.requestedCapabilityIds };
+    const approvalId = `approval:${crypto.randomUUID()}`;
+    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    await env.CONTROL_DB.prepare(
+      `INSERT INTO approvals
+       (deployment_id, approval_id, principal_id, capability_id, request_digest, preview_json,
+        status, created_at, expires_at, request_json, task_id, gatekeeper_id)
+       VALUES (?, ?, ?, 'plugin.capabilities.grant', ?, ?, 'pending', ?, ?, ?, ?,
+         'gatekeeper:plugin-control')`,
+    ).bind(input["deploymentId"], approvalId, input["principalId"],
+      await createRequestDigest(approvalRequest), JSON.stringify({
+        operation: "Grant plugin capabilities", destination: manifest.id,
+        version: manifest.version, addedCapabilityIds: manifest.requestedCapabilityIds,
+      }), now, expiresAt, JSON.stringify(approvalRequest), `plugin-install:${versionId}`).run();
+    const audited = await audit(env, { deploymentId: String(input["deploymentId"]),
+      principalId: String(input["principalId"]), eventType: "plugin.installation.approval.requested",
+      outcome: "success", requestId: String(input["requestId"]),
+      metadata: { installationId, pluginId: manifest.id, versionId, approvalId },
+    });
+    return audited ? Response.json({ installationId, versionId, manifest,
+      status: "pending-approval", approvalId,
+      addedCapabilityIds: manifest.requestedCapabilityIds }, { status: 202 })
+      : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+  }
+  const audited = await audit(env, { deploymentId: String(input["deploymentId"]),
+    principalId: String(input["principalId"]), eventType: "plugin.installed", outcome: "success",
+    requestId: String(input["requestId"]), metadata: { installationId, pluginId: manifest.id,
+      version: manifest.version },
+  });
+  return audited ? Response.json({ installationId, versionId, manifest, status: "active" },
+    { status: 201 }) : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+}
+
+async function addPluginVersion(request: Request, env: Bindings): Promise<Response> {
+  const input = await pluginMutationInput(request);
+  if (!input || typeof input["installationId"] !== "string" ||
+    typeof input["inspectionId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const installation = await env.CONTROL_DB.prepare(
+    `SELECT plugin_id, granted_capability_ids_json, status FROM plugin_installations
+     WHERE deployment_id = ? AND installation_id = ?`,
+  ).bind(input["deploymentId"], input["installationId"]).first<{
+    plugin_id: string; granted_capability_ids_json: string; status: string;
+  }>();
+  const inspection = await env.CONTROL_DB.prepare(
+    `SELECT p.archive_sha256, p.manifest_json, p.expires_at FROM plugin_inspections p
+     WHERE p.deployment_id = ? AND p.inspection_id = ? AND p.status = 'accepted'`,
+  ).bind(input["deploymentId"], input["inspectionId"]).first<{
+    archive_sha256: string; manifest_json: string; expires_at: string;
+  }>();
+  if (!installation || installation.status === "removed") {
+    return Response.json({ code: "PLUGIN_INSTALLATION_NOT_FOUND" }, { status: 404 });
+  }
+  if (!inspection || Date.parse(inspection.expires_at) <= Date.now()) {
+    return Response.json({ code: "PLUGIN_INSPECTION_EXPIRED" }, { status: 409 });
+  }
+  const manifest = pluginManifestSchema.parse(JSON.parse(inspection.manifest_json) as unknown);
+  if (manifest.id !== installation.plugin_id) {
+    return Response.json({ code: "PLUGIN_ID_MISMATCH" }, { status: 409 });
+  }
+  const granted = new Set(JSON.parse(installation.granted_capability_ids_json) as string[]);
+  const addedCapabilities = manifest.requestedCapabilityIds.filter((id) => !granted.has(id));
+  const versionId = `plugin-version:${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+  await env.CONTROL_DB.prepare(
+    `INSERT INTO plugin_versions
+     (deployment_id, version_id, installation_id, plugin_id, plugin_version,
+      archive_sha256, manifest_json, requested_capability_ids_json, status, created_at, activated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(input["deploymentId"], versionId, input["installationId"], manifest.id,
+    manifest.version, inspection.archive_sha256, JSON.stringify(manifest),
+    JSON.stringify(manifest.requestedCapabilityIds),
+    addedCapabilities.length > 0 ? "pending-approval" : "active", now,
+    addedCapabilities.length > 0 ? null : now).run();
+  if (addedCapabilities.length === 0) {
+    await env.CONTROL_DB.batch([
+      env.CONTROL_DB.prepare(
+        `UPDATE plugin_versions SET status = 'superseded'
+         WHERE deployment_id = ? AND installation_id = ? AND version_id != ? AND status = 'active'`,
+      ).bind(input["deploymentId"], input["installationId"], versionId),
+      env.CONTROL_DB.prepare(
+        `UPDATE plugin_installations SET plugin_version = ?, artifact_sha256 = ?, manifest_json = ?,
+           active_version_id = ?, updated_at = ? WHERE deployment_id = ? AND installation_id = ?`,
+      ).bind(manifest.version, inspection.archive_sha256, JSON.stringify(manifest), versionId, now,
+        input["deploymentId"], input["installationId"]),
+    ]);
+    await audit(env, { deploymentId: String(input["deploymentId"]),
+      principalId: String(input["principalId"]), eventType: "plugin.version.activated",
+      outcome: "success", requestId: String(input["requestId"]),
+      metadata: { installationId: input["installationId"], versionId, version: manifest.version },
+    });
+    return Response.json({ installationId: input["installationId"], versionId,
+      status: "active", manifest }, { status: 201 });
+  }
+  const approvalRequest = { installationId: input["installationId"], versionId,
+    addedCapabilityIds: addedCapabilities };
+  const approvalId = `approval:${crypto.randomUUID()}`;
+  const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+  await env.CONTROL_DB.prepare(
+    `INSERT INTO approvals
+     (deployment_id, approval_id, principal_id, capability_id, request_digest, preview_json,
+      status, created_at, expires_at, request_json, task_id, gatekeeper_id)
+     VALUES (?, ?, ?, 'plugin.capabilities.grant', ?, ?, 'pending', ?, ?, ?, ?,
+       'gatekeeper:plugin-control')`,
+  ).bind(input["deploymentId"], approvalId, input["principalId"],
+    await createRequestDigest(approvalRequest), JSON.stringify({ operation: "Grant plugin capabilities",
+      destination: manifest.id, version: manifest.version, addedCapabilityIds: addedCapabilities }),
+    now, expiresAt, JSON.stringify(approvalRequest), `plugin-update:${versionId}`).run();
+  await audit(env, { deploymentId: String(input["deploymentId"]),
+    principalId: String(input["principalId"]), eventType: "plugin.version.approval.requested",
+    outcome: "success", requestId: String(input["requestId"]),
+    metadata: { installationId: input["installationId"], versionId, approvalId },
+  });
+  return Response.json({ installationId: input["installationId"], versionId,
+    status: "pending-approval", approvalId, addedCapabilityIds: addedCapabilities,
+    manifest }, { status: 202 });
+}
+
+async function rollbackPlugin(request: Request, env: Bindings): Promise<Response> {
+  const input = await pluginMutationInput(request);
+  if (!input || typeof input["installationId"] !== "string" ||
+    typeof input["versionId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const target = await env.CONTROL_DB.prepare(
+    `SELECT plugin_version, archive_sha256, manifest_json, requested_capability_ids_json
+     FROM plugin_versions WHERE deployment_id = ? AND installation_id = ? AND version_id = ?
+       AND status IN ('active', 'superseded')`,
+  ).bind(input["deploymentId"], input["installationId"], input["versionId"]).first<{
+    plugin_version: string; archive_sha256: string; manifest_json: string;
+    requested_capability_ids_json: string;
+  }>();
+  if (!target) return Response.json({ code: "PLUGIN_VERSION_NOT_FOUND" }, { status: 404 });
+  const now = new Date().toISOString();
+  await env.CONTROL_DB.batch([
+    env.CONTROL_DB.prepare(
+      `UPDATE plugin_versions SET status = 'superseded'
+       WHERE deployment_id = ? AND installation_id = ? AND status = 'active'`,
+    ).bind(input["deploymentId"], input["installationId"]),
+    env.CONTROL_DB.prepare(
+      `UPDATE plugin_versions SET status = 'active', activated_at = ?
+       WHERE deployment_id = ? AND version_id = ?`,
+    ).bind(now, input["deploymentId"], input["versionId"]),
+    env.CONTROL_DB.prepare(
+      `UPDATE plugin_installations SET plugin_version = ?, artifact_sha256 = ?, manifest_json = ?,
+         granted_capability_ids_json = ?, active_version_id = ?, status = 'active', updated_at = ?
+       WHERE deployment_id = ? AND installation_id = ? AND status != 'removed'`,
+    ).bind(target.plugin_version, target.archive_sha256, target.manifest_json,
+      target.requested_capability_ids_json, input["versionId"], now,
+      input["deploymentId"], input["installationId"]),
+  ]);
+  await audit(env, { deploymentId: String(input["deploymentId"]),
+    principalId: String(input["principalId"]), eventType: "plugin.version.rolled-back",
+    outcome: "success", requestId: String(input["requestId"]),
+    metadata: { installationId: input["installationId"], versionId: input["versionId"] },
+  });
+  return Response.json({ installationId: input["installationId"],
+    versionId: input["versionId"], status: "active" });
+}
+
+async function mutatePlugin(request: Request, env: Bindings): Promise<Response> {
+  const input = await pluginMutationInput(request);
+  if (!input || typeof input["installationId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const current = await env.CONTROL_DB.prepare(
+    `SELECT status FROM plugin_installations WHERE deployment_id = ? AND installation_id = ?`,
+  ).bind(input["deploymentId"], input["installationId"]).first<{ status: string }>();
+  if (!current) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
+  const now = new Date().toISOString();
+  if (request.method === "DELETE") {
+    await env.CONTROL_DB.prepare(
+      `UPDATE plugin_installations SET status = 'removed', removed_at = ?, updated_at = ?
+       WHERE deployment_id = ? AND installation_id = ?`,
+    ).bind(now, now, input["deploymentId"], input["installationId"]).run();
+    await env.CONTROL_DB.prepare(
+      `UPDATE plugin_versions SET status = 'revoked'
+       WHERE deployment_id = ? AND installation_id = ? AND status != 'revoked'`,
+    ).bind(input["deploymentId"], input["installationId"]).run();
+  } else {
+    if (typeof input["enabled"] !== "boolean") {
+      return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+    }
+    await env.CONTROL_DB.prepare(
+      `UPDATE plugin_installations SET status = ?, updated_at = ?
+       WHERE deployment_id = ? AND installation_id = ? AND status != 'removed'`,
+    ).bind(input["enabled"] ? "active" : "disabled", now,
+      input["deploymentId"], input["installationId"]).run();
+  }
+  const status = request.method === "DELETE" ? "removed" : input["enabled"] ? "active" : "disabled";
+  const audited = await audit(env, { deploymentId: String(input["deploymentId"]),
+    principalId: String(input["principalId"]), eventType: request.method === "DELETE"
+      ? "plugin.removed" : "plugin.status.changed", outcome: "success",
+    requestId: String(input["requestId"]), metadata: { installationId: input["installationId"], status },
+  });
+  return audited ? Response.json({ installationId: input["installationId"], status })
+    : Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
+}
+
+async function pluginCapabilityCall(request: Request): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value) ||
+    typeof (value as Record<string, unknown>)["capabilityId"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  return Response.json({ code: "CAPABILITY_EXECUTION_REQUIRES_OWNER_APPROVAL" }, { status: 409 });
+}
+
+async function recordPluginExecution(request: Request, env: Bindings): Promise<Response> {
+  const value: unknown = await request.json().catch(() => null);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const input = value as Record<string, unknown>;
+  if (typeof input["deploymentId"] !== "string" || typeof input["executionId"] !== "string" ||
+    typeof input["installationId"] !== "string" || typeof input["toolId"] !== "string" ||
+    typeof input["durationMs"] !== "number" || typeof input["meter"] !== "object" ||
+    input["meter"] === null || !["success", "failure", "timeout", "unknown"].includes(
+      String(input["outcome"]))) {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const now = new Date();
+  await env.CONTROL_DB.prepare(
+    `INSERT OR IGNORE INTO plugin_execution_metadata
+     (deployment_id, execution_id, installation_id, tool_id, result_digest, duration_ms,
+      meter_json, outcome, error_code, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(input["deploymentId"], input["executionId"], input["installationId"], input["toolId"],
+    typeof input["resultDigest"] === "string" ? input["resultDigest"] : null,
+    Math.max(0, Math.round(input["durationMs"])), JSON.stringify(input["meter"]), input["outcome"],
+    typeof input["errorCode"] === "string" ? input["errorCode"] : null, now.toISOString(),
+    new Date(now.getTime() + 7 * 24 * 60 * 60_000).toISOString()).run();
+  return Response.json({ recorded: true }, { status: 201 });
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -1158,6 +1670,38 @@ export default {
     if ((request.method === "GET" || request.method === "PATCH") &&
       url.pathname === "/internal/v1/settings/preferences") {
       return ownerPreferences(request, env);
+    }
+    if ((request.method === "GET" || request.method === "POST" || request.method === "DELETE") &&
+      url.pathname === "/internal/v1/conversations/registry") {
+      return conversationRegistry(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/internal/v1/storage/status") {
+      return conversationStorageStatus(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/internal/v1/plugins") {
+      return listPlugins(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/plugins/inspections") {
+      return recordPluginInspection(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/plugins/install") {
+      return installPlugin(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/plugins/version") {
+      return addPluginVersion(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/plugins/rollback") {
+      return rollbackPlugin(request, env);
+    }
+    if ((request.method === "PATCH" || request.method === "DELETE") &&
+      url.pathname === "/internal/v1/plugins/installation") {
+      return mutatePlugin(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/plugin/capability-call") {
+      return pluginCapabilityCall(request);
+    }
+    if (request.method === "POST" && url.pathname === "/internal/v1/plugin/executions") {
+      return recordPluginExecution(request, env);
     }
     if (request.method === "POST" && url.pathname === "/internal/v1/discord/link-codes") {
       return createDiscordLinkCode(request, env);

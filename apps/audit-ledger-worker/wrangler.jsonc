@@ -5,6 +5,20 @@
   "compatibility_date": "2026-08-11",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
+  "d1_databases": [
+    {
+      "binding": "CONTROL_DB",
+      "database_name": "opap-control-development",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "../../migrations/control"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIT_CHECKPOINTS",
+      "bucket_name": "opap-private-development"
+    }
+  ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["AuditLedger"] }
   ]

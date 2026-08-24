@@ -1,0 +1,6 @@
+{
+  "id": "minimal",
+  "stability": "beta",
+  "workers": ["quota-worker", "audit-ledger-worker", "policy-control-worker", "conversation-agent", "maintenance-worker", "google-gatekeeper", "github-gatekeeper", "discord-gatekeeper", "delegated-source-gatekeeper", "assistant-worker"],
+  "features": ["mock-provider", "private-plane", "static-plugins"]
+}

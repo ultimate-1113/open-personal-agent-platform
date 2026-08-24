@@ -41,6 +41,14 @@
       "binding": "DELEGATED_SOURCE_ADMIN",
       "service": "opap-delegated-source-gatekeeper",
       "entrypoint": "DelegatedSourceAdminEntrypoint"
+    },
+    {
+      "binding": "MAINTENANCE",
+      "service": "opap-maintenance"
+    },
+    {
+      "binding": "PLUGIN_RUNTIME",
+      "service": "opap-plugin-runtime"
     }
   ],
   "durable_objects": {

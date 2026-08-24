@@ -1,0 +1,45 @@
+{
+  "apiVersion": "opap.dev/deployment-target/v1alpha1",
+  "id": "test",
+  "deploymentName": "opap-test-beta2",
+  "environment": "production",
+  "profile": "cloud-base",
+  "providers": {
+    "aiSearch": false,
+    "discord": false,
+    "google": false,
+    "github": false,
+    "dynamicPlugin": false
+  },
+  "resources": {
+    "workers": {
+      "opap-quota": "opap-test-beta2-quota",
+      "opap-audit-ledger": "opap-test-beta2-audit-ledger",
+      "opap-policy-control": "opap-test-beta2-policy-control",
+      "opap-conversation-agent": "opap-test-beta2-conversation-agent",
+      "opap-maintenance": "opap-test-beta2-maintenance",
+      "opap-assistant": "opap-test-beta2-assistant",
+      "opap-public-agent-api": "opap-test-beta2-public-agent-api",
+      "opap-delegated-agent-api": "opap-test-beta2-delegated-agent-api",
+      "opap-plugin-runtime": "opap-test-beta2-plugin-runtime",
+      "opap-google-gatekeeper": "opap-test-beta2-google-gatekeeper",
+      "opap-github-gatekeeper": "opap-test-beta2-github-gatekeeper",
+      "opap-delegated-source-gatekeeper": "opap-test-beta2-delegated-source-gatekeeper",
+      "opap-discord": "opap-test-beta2-discord",
+      "opap-discord-gatekeeper": "opap-test-beta2-discord-gatekeeper"
+    },
+    "containers": {
+      "opap-plugin-runtime-sandbox": "opap-test-beta2-plugin-runtime-sandbox"
+    },
+    "d1": {
+      "opap-control-development": "opap-test-beta2-control",
+      "opap-google-gatekeeper-development": "opap-test-beta2-google-gatekeeper",
+      "opap-github-gatekeeper-development": "opap-test-beta2-github-gatekeeper",
+      "opap-delegated-source-gatekeeper-development": "opap-test-beta2-delegated-source-gatekeeper",
+      "opap-discord-gatekeeper-dev": "opap-test-beta2-discord-gatekeeper"
+    },
+    "r2": {
+      "opap-private-development": "opap-test-beta2-private"
+    }
+  }
+}

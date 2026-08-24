@@ -1,0 +1,32 @@
+{
+  "apiVersion": "opap.dev/v1alpha1",
+  "kind": "Plugin",
+  "id": "fixture.echo",
+  "version": "0.1.0",
+  "platformVersion": ">=0.1.0-beta.1 <0.2.0",
+  "runtime": { "kind": "static", "package": "@opap/plugin-fixture-echo" },
+  "tools": [{
+    "id": "fixture.echo.text",
+    "description": "Return the supplied text without external communication.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": { "text": { "type": "string", "maxLength": 4096 } },
+      "required": ["text"],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": { "text": { "type": "string" } },
+      "required": ["text"],
+      "additionalProperties": false
+    }
+  }],
+  "requestedCapabilityIds": [],
+  "limits": { "timeoutMs": 1000, "outputBytes": 8192, "concurrency": 1 },
+  "artifact": {
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sbomPath": "built-in"
+  }
+}

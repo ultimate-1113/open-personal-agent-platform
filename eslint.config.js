@@ -6,8 +6,12 @@ export default tseslint.config(
     ignores: [
       "eslint.config.js",
       "**/dist/**",
+      "**/dist-main/**",
+      "**/release*/**",
       "**/coverage/**",
       "**/.wrangler/**",
+      "**/.opap/**",
+      "**/.tmp/**",
     ],
   },
   eslint.configs.recommended,

@@ -1,6 +1,6 @@
 {
   "name": "@opap/delegated-source-gatekeeper",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,9 +9,5 @@
   },
   "dependencies": {
     "@opap/oauth-core": "workspace:*"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^4.20251202.0",
-    "wrangler": "^4.88.0"
   }
 }

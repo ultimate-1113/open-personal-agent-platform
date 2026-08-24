@@ -1,0 +1,13 @@
+{
+  "name": "@opap/maintenance-worker",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@opap/maintenance": "workspace:*"
+  }
+}

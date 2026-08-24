@@ -1,6 +1,6 @@
 {
   "name": "@opap/contracts",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "exports": {
@@ -11,6 +11,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "zod": "^4.1.13"
+    "zod": "^4.4.3"
   }
 }

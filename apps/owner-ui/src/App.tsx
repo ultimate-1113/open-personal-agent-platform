@@ -3,7 +3,7 @@ import { useLocale, type Locale, type Translate } from "./i18n.js";
 import type { MessageKey } from "./locales/en.js";
 import { useTheme } from "./theme.js";
 
-type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget" | "connections" | "knowledge";
+type Tab = "conversation" | "tasks" | "memory" | "approvals" | "audit" | "providers" | "budget" | "connections" | "knowledge" | "plugins";
 type ApprovalFilter = "pending" | "approved" | "all";
 type ConnectorApprovalMode = "manual" | "open" | "auto-read";
 type ApiRecord = Record<string, unknown>;
@@ -23,6 +23,7 @@ const tabs: readonly { id: Tab; labelKey: MessageKey }[] = [
   { id: "budget", labelKey: "tab.budget" },
   { id: "connections", labelKey: "tab.connections" },
   { id: "knowledge", labelKey: "tab.knowledge" },
+  { id: "plugins", labelKey: "tab.plugins" },
 ];
 
 const api = async (
@@ -59,12 +60,54 @@ const display = (value: unknown, fallback = ""): string =>
     ? String(value)
     : fallback;
 
+const record = (value: unknown): ApiRecord =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as ApiRecord : {};
+
+const stringItems = (value: unknown): string[] =>
+  Array.isArray(value) ? value.map((item) => display(item)).filter(Boolean) : [];
+
+const StructuredValue = ({ value }: { value: unknown }) => {
+  if (Array.isArray(value)) {
+    const items = value as unknown[];
+    return items.length === 0 ? <span className="structured-empty">—</span> :
+      <ul className="structured-list">{items.map((item, index) =>
+        <li key={`${index}:${display(item)}`}><StructuredValue value={item} /></li>)}</ul>;
+  }
+  if (typeof value === "object" && value !== null) {
+    return <dl className="structured-data">{Object.entries(value as Record<string, unknown>).map(([key, item]) => <div key={key}>
+      <dt>{key}</dt><dd><StructuredValue value={item} /></dd>
+    </div>)}</dl>;
+  }
+  return <span>{display(value, "—") || "—"}</span>;
+};
+
+const localizedNumber = (value: unknown, locale: Locale): string =>
+  typeof value === "number" && Number.isFinite(value) ? value.toLocaleString(locale) : "—";
+
+const shortenedIdentifier = (value: unknown): string => {
+  const identifier = display(value);
+  return identifier.length > 12 ? `…${identifier.slice(-6)}` : identifier;
+};
+
 const localizedError = (reason: unknown, t: Translate, fallback: MessageKey): string =>
   reason instanceof Error ? reason.message : t(fallback);
 
 const knowledgeProviderLabel = (value: unknown, t: Translate): string =>
   value === "google" || value === "google-drive" ? t("knowledge.googleDrive")
     : value === "github" ? t("knowledge.github") : display(value);
+
+const modelProviderLabel = (value: unknown, t: Translate): string =>
+  value === "provider:workers-ai" ? t("providers.workersAi")
+    : value === "provider:mock-local" ? t("providers.mockLocal") : display(value);
+
+const modelPolicyLabel = (value: string, t: Translate): string => {
+  const labels: Record<string, MessageKey> = {
+    public: "providers.valuePublic", owner: "providers.valueOwner",
+    "delegated-principal": "providers.valueDelegated",
+    normal: "providers.valueNormal", sensitive: "providers.valueSensitive", secret: "providers.valueSecret",
+  };
+  return labels[value] ? t(labels[value]) : value;
+};
 
 const defaultTimeZone = (): string => Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Tokyo";
 
@@ -185,6 +228,7 @@ export function App() {
   const [discordCodeCopied, setDiscordCodeCopied] = useState(false);
   const [ownerTimeZone, setOwnerTimeZone] = useState(defaultTimeZone);
   const [ownerTimeZoneDraft, setOwnerTimeZoneDraft] = useState(defaultTimeZone);
+  const [pluginInspection, setPluginInspection] = useState<ApiRecord>();
   const loadSequence = useRef(0);
   const conversationList = useRef<HTMLElement>(null);
   const request = useCallback(
@@ -226,6 +270,8 @@ export function App() {
         nextData = await request("/v1/connections");
       } else if (tab === "knowledge") {
         nextData = await request("/v1/delegated-sources");
+      } else if (tab === "plugins") {
+        nextData = await request("/v1/plugins");
       } else {
         const [policy, usage] = await Promise.all([
           request("/v1/settings/budgets"),
@@ -787,6 +833,103 @@ export function App() {
     }
   };
 
+  const inspectPlugin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const file = new FormData(event.currentTarget).get("archive");
+    if (!(file instanceof File)) return;
+    setBusy(true);
+    setError("");
+    try {
+      setPluginInspection(await request("/v1/plugins/inspections", {
+        method: "POST",
+        headers: { "Content-Type": "application/gzip", "Idempotency-Key": crypto.randomUUID() },
+        body: file,
+      }));
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const installPlugin = async () => {
+    const inspectionId = display(pluginInspection?.["inspectionId"]);
+    if (!inspectionId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request("/v1/plugins", { method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ inspectionId }) });
+      setPluginInspection(undefined);
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updatePlugin = async (installationId: string) => {
+    const inspectionId = display(pluginInspection?.["inspectionId"]);
+    if (!inspectionId || !installationId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/plugins/${encodeURIComponent(installationId)}/versions`, { method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ inspectionId }) });
+      setPluginInspection(undefined);
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rollbackPlugin = async (installationId: string, versionId: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/plugins/${encodeURIComponent(installationId)}/rollback`, { method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ versionId }) });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setPluginEnabled = async (installationId: string, enabled: boolean) => {
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/plugins/${encodeURIComponent(installationId)}`, { method: "PATCH",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ enabled }) });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removePlugin = async (installationId: string) => {
+    if (!window.confirm(t("plugins.removeConfirm"))) return;
+    setBusy(true);
+    setError("");
+    try {
+      await request(`/v1/plugins/${encodeURIComponent(installationId)}`, { method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() } });
+      await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
 
   const unfilteredCollection = tab === "tasks"
     ? rows(data["tasks"])
@@ -829,11 +972,21 @@ export function App() {
   const discordInstallUrls = typeof discord["installUrls"] === "object" && discord["installUrls"] !== null
     ? discord["installUrls"] as ApiRecord : {};
   const discordDestinations = rows(discord["destinations"]);
+  const hasGuildDestination = discordDestinations.some((destination) => destination["kind"] === "guild-channel");
   const delegatedConnections = tab === "knowledge" ? rows(data["connections"])
     .filter((connection) => connection["status"] === "active") : [];
   const delegatedSources = tab === "knowledge" ? rows(data["sources"])
     .filter((source) => source["enabled"] !== false) : [];
+  const plugins = tab === "plugins" ? rows(data["plugins"])
+    .filter((plugin) => plugin["status"] !== "removed") : [];
   const activeTab = tabs.find((item) => item.id === tab);
+
+  const budgetPolicy = record(data["policy"]);
+  const nonAiBudgetPolicy = record(budgetPolicy["nonAi"]);
+  const aiBudgetPolicy = record(budgetPolicy["ai"]);
+  const budgetUsage = record(data["usage"]);
+  const budgetResources = rows(budgetUsage["resources"]);
+  const budgetAiUsage = record(budgetUsage["ai"]);
 
   return <div className="shell">
     <aside>
@@ -877,7 +1030,7 @@ export function App() {
       </div>
       <div className="status"><span />{t("app.connected")}</div>
     </aside>
-    <main>
+    <main className={`workspace workspace-${tab}`}>
       <header>
         <div>
           <p className="eyebrow">{t("app.workspace")}</p>
@@ -974,7 +1127,9 @@ export function App() {
                     void updateDiscordDestination(destination,
                       formText(form, "displayPolicy"), formText(form, "commandPolicy"));
                   }}>
-                  <span>{display(destination["kind"])}: <code>{display(destination["channelId"])}</code></span>
+                  <span title={display(destination["channelId"])}>{destination["kind"] === "dm"
+                    ? t("connections.discordDirectMessage")
+                    : `${t("connections.discordGuildChannel")} ${shortenedIdentifier(destination["channelId"])}`}</span>
                   {destination["kind"] === "guild-channel" && <>
                     <select name="displayPolicy" defaultValue={display(destination["displayPolicy"])}>
                       <option value="metadata-only">metadata-only</option>
@@ -1002,14 +1157,21 @@ export function App() {
                 onClick={() => void createDiscordLinkCode()}>
                 {t("connections.discordGenerateCode")}
               </button>}
-              {typeof discordInstallUrls["user"] === "string" &&
-                <a className="button-link" href={display(discordInstallUrls["user"])} target="_blank" rel="noreferrer">
-                  {t("connections.discordUserInstall")}
-                </a>}
-              {typeof discordInstallUrls["guild"] === "string" &&
-                <a className="button-link" href={display(discordInstallUrls["guild"])} target="_blank" rel="noreferrer">
-                  {t("connections.discordGuildInstall")}
-                </a>}
+              {((!discordLink && typeof discordInstallUrls["user"] === "string") ||
+                (!hasGuildDestination && typeof discordInstallUrls["guild"] === "string")) &&
+                <details className="install-options">
+                  <summary>{t("connections.discordInstallOptions")}</summary>
+                  <div>
+                    {!discordLink && typeof discordInstallUrls["user"] === "string" &&
+                      <a className="button-link" href={display(discordInstallUrls["user"])} target="_blank" rel="noreferrer">
+                        {t("connections.discordUserInstall")}
+                      </a>}
+                    {!hasGuildDestination && typeof discordInstallUrls["guild"] === "string" &&
+                      <a className="button-link" href={display(discordInstallUrls["guild"])} target="_blank" rel="noreferrer">
+                        {t("connections.discordGuildInstall")}
+                      </a>}
+                  </div>
+                </details>}
               {discordLink && <button type="button" className="danger" disabled={busy}
                 onClick={() => void disconnectDiscord()}>{t("connections.disconnect")}</button>}
             </div>
@@ -1055,16 +1217,57 @@ export function App() {
               onClick={() => void disconnectDelegatedSource(display(connection["connectionId"]))}>
               {t("connections.disconnect")}</button></article>)}</section>
         <section className="cards">{delegatedSources.length === 0 ? <div className="empty"><strong>{t("empty.title")}</strong></div>
-          : delegatedSources.map((source) => <article key={display(source["sourceId"])}><div>
-            <strong>{display(source["sourceId"])}</strong><p>{knowledgeProviderLabel(source["sourceType"], t)} · v{display(source["sourceVersion"])}</p>
-            <small>{t("knowledge.resources")}: {JSON.stringify(source["resourceIds"])}</small>
-            <small>{t("knowledge.cacheState")}: {typeof source["cachePolicy"] === "object" &&
-              source["cachePolicy"] !== null && (source["cachePolicy"] as ApiRecord)["enabled"] === true
-                ? t("knowledge.enabled") : t("knowledge.disabled")}</small></div>
-            <div className="inline-actions"><button disabled={busy}
-              onClick={() => void toggleDelegatedSourceCache(source)}>{t("knowledge.toggleCache")}</button>
-            <button className="danger" disabled={busy} onClick={() => void deleteDelegatedSource(display(source["sourceId"]))}>
-              {t("items.delete")}</button></div></article>)}</section>
+          : delegatedSources.map((source) => <article className="knowledge-source-card" key={display(source["sourceId"])}>
+            <details><summary><span><strong>{display(source["sourceId"])}</strong>
+              <small>{knowledgeProviderLabel(source["sourceType"], t)} · v{display(source["sourceVersion"])} · {t("knowledge.cacheState")}: {
+                typeof source["cachePolicy"] === "object" && source["cachePolicy"] !== null &&
+                (source["cachePolicy"] as ApiRecord)["enabled"] === true ? t("knowledge.enabled") : t("knowledge.disabled")}</small>
+            </span><span className="details-label">{t("knowledge.details")}</span></summary>
+              <div className="knowledge-source-details">
+                <div className="resource-list"><span>{t("knowledge.resources")}</span>
+                  {stringItems(source["resourceIds"]).length === 0 ? <strong>—</strong> :
+                    <ul>{stringItems(source["resourceIds"]).map((resourceId) => <li key={resourceId}>{resourceId}</li>)}</ul>}
+                </div>
+                <div className="inline-actions"><button disabled={busy}
+                  onClick={() => void toggleDelegatedSourceCache(source)}>{t("knowledge.toggleCache")}</button>
+                <button className="danger" disabled={busy} onClick={() => void deleteDelegatedSource(display(source["sourceId"]))}>
+                  {t("items.delete")}</button></div>
+              </div>
+            </details></article>)}</section>
+      </>}
+      {tab === "plugins" && <>
+        <form className="memory-form" onSubmit={(event) => { void inspectPlugin(event); }}>
+          <strong>{t("plugins.inspectTitle")}</strong>
+          <p>{t("plugins.experimentalHelp")}</p>
+          <label>{t("plugins.archive")}<input name="archive" type="file"
+            accept="application/gzip,.tgz" required /></label>
+          <button disabled={busy}>{t("plugins.inspect")}</button>
+        </form>
+        {pluginInspection && <section className="connection-actions"><div>
+          <strong>{display((pluginInspection["manifest"] as ApiRecord | undefined)?.["id"])}</strong>
+          <p>{t("plugins.inspectionAccepted")} · {display(pluginInspection["archiveSha256"])}</p>
+          <small>{t("plugins.expires")}: {display(pluginInspection["expiresAt"])}</small>
+        </div><div className="actions"><button disabled={busy} onClick={() => void installPlugin()}>{t("plugins.install")}</button>
+          {plugins.map((plugin) => <button key={display(plugin["installationId"])} disabled={busy}
+            onClick={() => void updatePlugin(display(plugin["installationId"]))}>
+            {t("plugins.update")} {display(plugin["pluginId"])}</button>)}</div></section>}
+        <section className="cards">{plugins.length === 0
+          ? <div className="empty"><strong>{t("empty.title")}</strong></div>
+          : plugins.map((plugin) => <article key={display(plugin["installationId"])}><div>
+            <strong>{display(plugin["pluginId"])}</strong>
+            <p>v{display(plugin["version"])} · {display(plugin["status"])}</p>
+            <small>{t("plugins.capabilities")}: {Array.isArray(plugin["grantedCapabilityIds"])
+              ? plugin["grantedCapabilityIds"].join(", ") || t("plugins.none") : t("plugins.none")}</small>
+            {rows(plugin["versions"]).filter((version) => version["status"] === "superseded")
+              .map((version) => <button key={display(version["versionId"])} className="quiet" disabled={busy}
+                onClick={() => void rollbackPlugin(display(plugin["installationId"]), display(version["versionId"]))}>
+                {t("plugins.rollback")} v{display(version["version"])}</button>)}
+          </div><div className="inline-actions">
+            <button disabled={busy} onClick={() => void setPluginEnabled(display(plugin["installationId"]),
+              plugin["status"] !== "active")}>{t(plugin["status"] === "active" ? "plugins.disable" : "plugins.enable")}</button>
+            <button className="danger" disabled={busy}
+              onClick={() => void removePlugin(display(plugin["installationId"]))}>{t("items.delete")}</button>
+          </div></article>)}</section>
       </>}
       {tab === "tasks" &&
         <>
@@ -1120,15 +1323,42 @@ export function App() {
         </form>}
       {tab === "budget"
         ? <>
-            <form onSubmit={(event) => { void submit(event); }} className="memory-form budget-form">
-              <label>{t("budget.nonAiHardLimit")}<input name="fraction" type="number" min="10" max="100" defaultValue="80" /></label>
-              <label className="check"><input name="unlimited" type="checkbox" />{t("budget.disableNonAiStop")}</label>
-              <label>{t("budget.aiMonthlyOverage")}<input name="aiBudget" type="number" min="0" step="0.5" defaultValue="5" /></label>
-              <label className="check"><input name="aiUnlimited" type="checkbox" />{t("budget.unlimitedAi")}</label>
+            <form key={JSON.stringify(budgetPolicy)} onSubmit={(event) => { void submit(event); }} className="memory-form budget-form">
+              <label>{t("budget.nonAiHardLimit")}<input name="fraction" type="number" min="10" max="100"
+                defaultValue={typeof nonAiBudgetPolicy["fraction"] === "number" ? nonAiBudgetPolicy["fraction"] * 100 : 80} /></label>
+              <label className="check"><input name="unlimited" type="checkbox"
+                defaultChecked={nonAiBudgetPolicy["mode"] === "unlimited"} />{t("budget.disableNonAiStop")}</label>
+              <label>{t("budget.aiMonthlyOverage")}<input name="aiBudget" type="number" min="0" step="0.5"
+                defaultValue={typeof aiBudgetPolicy["monthlyOverageUsd"] === "number" ? aiBudgetPolicy["monthlyOverageUsd"] : 5} /></label>
+              <label className="check"><input name="aiUnlimited" type="checkbox"
+                defaultChecked={aiBudgetPolicy["monthlyOverageUsd"] === null} />{t("budget.unlimitedAi")}</label>
               <p className="warning">{t("budget.safetyWarning")}</p>
               <button disabled={busy}>{t("budget.update")}</button>
             </form>
-            <pre className="policy">{JSON.stringify(data, null, 2)}</pre>
+            <section className="budget-summary">
+              <div className="summary-grid">
+                <article><small>{t("budget.nonAiPolicy")}</small><strong>{nonAiBudgetPolicy["mode"] === "unlimited"
+                  ? t("budget.unlimited") : `${localizedNumber(
+                    typeof nonAiBudgetPolicy["fraction"] === "number" ? nonAiBudgetPolicy["fraction"] * 100 : undefined,
+                    locale)}%`}</strong></article>
+                <article><small>{t("budget.aiPolicy")}</small><strong>{aiBudgetPolicy["monthlyOverageUsd"] === null
+                  ? t("budget.unlimited") : `$${localizedNumber(aiBudgetPolicy["monthlyOverageUsd"], locale)}`}</strong></article>
+                <article><small>{t("budget.billingPeriod")}</small><strong>{display(budgetUsage["currentPeriod"], "—")}</strong></article>
+                <article><small>{t("budget.catalog")}</small><strong>{display(budgetPolicy["pricingCatalogVersion"], "—")}</strong></article>
+              </div>
+              <h2>{t("budget.resourceUsage")}</h2>
+              <div className="table-scroll"><table><thead><tr><th>{t("budget.resource")}</th><th>{t("budget.used")}</th>
+                <th>{t("budget.reserved")}</th><th>{t("budget.hardLimit")}</th><th>{t("budget.mode")}</th></tr></thead>
+                <tbody>{budgetResources.map((resource) => <tr key={display(resource["resource"])}>
+                  <td>{display(resource["resource"])}</td><td>{localizedNumber(resource["used"], locale)}</td>
+                  <td>{localizedNumber(resource["reserved"], locale)}</td><td>{localizedNumber(resource["hardLimit"], locale)}</td>
+                  <td>{display(resource["mode"], "—")}</td></tr>)}</tbody></table></div>
+              {Object.keys(budgetAiUsage).length > 0 && <div className="ai-usage">
+                <strong>{t("budget.aiUsage")}</strong>
+                <span>{t("budget.neurons")}: {localizedNumber(budgetAiUsage["used"], locale)}</span>
+                <span>{t("budget.overageUsed")}: ${localizedNumber(budgetAiUsage["overageUsedUsd"], locale)}</span>
+              </div>}
+            </section>
           </>
           : tab === "providers" || tab === "knowledge"
           ? null
@@ -1222,7 +1452,7 @@ export function App() {
                                 })()}
                               {tab === "approvals" && typeof item["preview"] === "object" &&
                                 item["preview"] !== null &&
-                                <pre className="policy">{JSON.stringify(item["preview"], null, 2)}</pre>}
+                                <div className="structured-panel"><StructuredValue value={item["preview"]} /></div>}
                               </>}
                       </div>
                       {tab === "approvals" && item["status"] === "pending" &&
@@ -1276,7 +1506,24 @@ export function App() {
           <p className="warning">{t("providers.warning")}</p>
           <button disabled={busy}>{t("providers.update")}</button>
         </form>
-        <pre className="policy">{JSON.stringify(data, null, 2)}</pre>
+        <section className="provider-summary cards">
+          {providerRows.map((provider) => <article key={display(provider["providerId"])}>
+            <div>
+              <strong>{modelProviderLabel(provider["providerId"], t)}</strong>
+              <p>{provider["enabled"] === true ? t("providers.enabled") : t("providers.disabled")}</p>
+              <div className="provider-permissions">
+                <span>{t("providers.visibility")}</span>
+                <ul>{stringItems(provider["allowedVisibilities"]).map((item) =>
+                  <li key={item}>{modelPolicyLabel(item, t)}</li>)}</ul>
+              </div>
+              <div className="provider-permissions">
+                <span>{t("providers.sensitivity")}</span>
+                <ul>{stringItems(provider["allowedSensitivities"]).map((item) =>
+                  <li key={item}>{modelPolicyLabel(item, t)}</li>)}</ul>
+              </div>
+            </div>
+          </article>)}
+        </section>
       </>}
     </main>
   </div>;

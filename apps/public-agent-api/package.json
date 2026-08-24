@@ -1,6 +1,6 @@
 {
   "name": "@opap/public-agent-api",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,14 +10,10 @@
   },
   "dependencies": {
     "@opap/contracts": "workspace:*",
-    "@opap/knowledge-source": "workspace:*",
     "@opap/knowledge-api": "workspace:*",
+    "@opap/knowledge-source": "workspace:*",
     "@opap/model-router": "workspace:*",
     "@opap/security": "workspace:*",
-    "hono": "^4.10.7"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^4.20251202.0",
-    "wrangler": "^4.88.0"
+    "hono": "^4.13.3"
   }
 }

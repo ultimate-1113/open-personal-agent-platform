@@ -1,6 +1,6 @@
 {
   "name": "@opap/assistant-worker",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,13 +14,9 @@
     "@opap/cost-control": "workspace:*",
     "@opap/discord-connector": "workspace:*",
     "@opap/identity": "workspace:*",
-    "@opap/security": "workspace:*",
-    "@opap/owner-ui": "workspace:*",
     "@opap/model-router": "workspace:*",
-    "hono": "^4.10.7"
-  },
-  "devDependencies": {
-    "@cloudflare/workers-types": "^4.20251202.0",
-    "wrangler": "^4.54.0"
+    "@opap/owner-ui": "workspace:*",
+    "@opap/security": "workspace:*",
+    "hono": "^4.13.3"
   }
 }

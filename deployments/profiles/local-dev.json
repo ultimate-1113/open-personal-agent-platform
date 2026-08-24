@@ -1,0 +1,6 @@
+{
+  "id": "local-dev",
+  "stability": "development",
+  "workers": ["quota-worker", "audit-ledger-worker", "policy-control-worker", "conversation-agent", "maintenance-worker", "google-gatekeeper", "github-gatekeeper", "discord-gatekeeper", "delegated-source-gatekeeper", "assistant-worker", "public-agent-api", "delegated-agent-api"],
+  "features": ["mock-provider", "fixture-source", "fake-connectors", "static-plugins"]
+}

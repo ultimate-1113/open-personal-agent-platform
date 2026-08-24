@@ -44,7 +44,8 @@ const forward = async (message: Record<string, unknown>): Promise<void> => {
   const channelId = message["channel_id"];
   const attachments = message["attachments"];
   if (typeof message["id"] !== "string" || typeof channelId !== "string" ||
-    message["guild_id"] !== undefined || typeof author["id"] !== "string" ||
+    !directMessageChannels.has(channelId) || message["guild_id"] !== undefined ||
+    typeof author["id"] !== "string" ||
     author["bot"] === true || typeof message["content"] !== "string" ||
     message["content"].length === 0 || (Array.isArray(attachments) && attachments.length > 0)) return;
   const body = JSON.stringify({
@@ -125,6 +126,16 @@ const connect = async (): Promise<void> => {
           if (typeof data["resume_gateway_url"] === "string") session.resumeGatewayUrl = data["resume_gateway_url"];
           ready = true;
           reconnects = 0;
+          directMessageChannels.clear();
+          if (Array.isArray(data["private_channels"])) {
+            for (const channel of data["private_channels"]) {
+              if (typeof channel === "object" && channel !== null &&
+                (channel as Record<string, unknown>)["type"] === 1 &&
+                typeof (channel as Record<string, unknown>)["id"] === "string") {
+                directMessageChannels.add(String((channel as Record<string, unknown>)["id"]));
+              }
+            }
+          }
           await saveState();
         } else if (payload.t === "RESUMED") {
           ready = true;
@@ -150,7 +161,12 @@ const connect = async (): Promise<void> => {
   }
 };
 
-createServer((_request, response) => {
+createServer((request, response) => {
+  if (request.url !== "/healthz") {
+    response.writeHead(404, { "Cache-Control": "no-store" });
+    response.end();
+    return;
+  }
   response.writeHead(ready ? 200 : 503, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   response.end(JSON.stringify({ service: "discord-gateway-bridge", status: ready ? "ok" : "degraded",
     experimental: true, reconnects, ...(lastEventAt ? { lastEventAt } : {}) }));

@@ -1,0 +1,45 @@
+{
+  "apiVersion": "opap.dev/deployment-target/v1alpha1",
+  "id": "staging",
+  "deploymentName": "opap-staging",
+  "environment": "staging",
+  "profile": "cloud-base",
+  "providers": {
+    "aiSearch": true,
+    "discord": true,
+    "google": true,
+    "github": true,
+    "dynamicPlugin": false
+  },
+  "resources": {
+    "workers": {
+      "opap-quota": "opap-quota-staging",
+      "opap-audit-ledger": "opap-audit-ledger-staging",
+      "opap-policy-control": "opap-policy-control-staging",
+      "opap-conversation-agent": "opap-conversation-agent-staging",
+      "opap-maintenance": "opap-maintenance-staging",
+      "opap-assistant": "opap-assistant-staging",
+      "opap-public-agent-api": "opap-public-staging",
+      "opap-delegated-agent-api": "opap-delegated-staging",
+      "opap-plugin-runtime": "opap-plugin-runtime-staging",
+      "opap-google-gatekeeper": "opap-google-gatekeeper-staging",
+      "opap-github-gatekeeper": "opap-github-gatekeeper-staging",
+      "opap-delegated-source-gatekeeper": "opap-delegated-source-gatekeeper-staging",
+      "opap-discord": "opap-discord-staging",
+      "opap-discord-gatekeeper": "opap-discord-gatekeeper-staging"
+    },
+    "containers": {
+      "opap-plugin-runtime-sandbox": "opap-plugin-runtime-staging-sandbox"
+    },
+    "d1": {
+      "opap-control-development": "opap-control-staging",
+      "opap-google-gatekeeper-development": "opap-google-gatekeeper-staging",
+      "opap-github-gatekeeper-development": "opap-github-gatekeeper-staging",
+      "opap-delegated-source-gatekeeper-development": "opap-delegated-source-gatekeeper-staging",
+      "opap-discord-gatekeeper-dev": "opap-discord-gatekeeper-staging"
+    },
+    "r2": {
+      "opap-private-development": "opap-private-staging"
+    }
+  }
+}

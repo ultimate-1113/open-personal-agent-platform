@@ -8,8 +8,8 @@ Open Personal Agent Platformは、Cloudflareを常時稼働する制御基盤と
 外部サイトの利用者はDelegated Principalとして分離され、Ownerの個人秘書を共同利用しません。
 
 > [!WARNING]
-> 現在のリリースは`v0.1.0-alpha.2`です。
-> Phase 4のKnowledge APIを実装した段階であり、本番SLAと長期API互換性は提供していません。
+> 現在の開発版は`v0.1.0-beta.1`を対象としています。
+> Cloud Baseはベータ対象です。Dynamic Plugin、Sandbox Preview、Docker版Discord Gateway Bridgeは実験機能です。
 
 ## 現在利用できる機能
 
@@ -33,15 +33,19 @@ Open Personal Agent Platformは、Cloudflareを常時稼働する制御基盤と
 - Fixture、静的Index、AI Search、Google Drive、GitHubのKnowledge Adapter
 - OpenAPI 3.1、型付き`@opap/sdk`、stateless Streamable HTTP MCP
 - 実際の`okidev-web` AI Search Bindingとstaging専用のPublic Endpoint互換Transport
+- Conversation Registry、Owner Export、削除の伝播、日次Audit Checkpoint、Retention Job
+- Build時に検証するStatic Plugin RegistryとOwner専用Dynamic Plugin Runtime
+- `local-dev`、`minimal`、`cloud-base`、実験的な`cloud-base-dynamic`の配置Profile
+- 実験的Discord Gateway Bridgeを実行するクロスOS対応Docker Compose
 
 Ownerは招待や他者の承認なしで初回設定を開始します。
 Delegated Principalは明示的に公開されたSourceだけを読み取れます。
 
-## 未実装の機能
+## 対象外
 
-動的Sandbox Pluginと本番配置ProfileはPhase 5で実装します。
 GitHubコード変更、決済、複数Owner、複数Tenantはv0.1の対象外です。
 Gmail送信は、正確な内容をOwnerが承認した場合に限り利用できます。
+Local AI Router、公開Plugin Registry、Pluginの任意Internet接続はbeta.1へ含めません。
 
 ## セキュリティ境界
 
@@ -63,7 +67,7 @@ Ownerデータは送信先が明示的に許可された場合だけCloud Provid
 
 ## 開発
 
-Node.js 24とpnpm 10が必要です。
+Node.js 24とpnpm 11が必要です。
 
 ```bash
 pnpm install --frozen-lockfile
@@ -78,8 +82,13 @@ pnpm check
 標準配置先はCloudflare Workers Paidです。
 配置固有のResource ID、Owner Email、Access Audience、Gateway IDは、Gitが無視する`.wrangler/`配下の生成ファイルへ設定します。
 
-現在の手順は[Phase 2 stagingガイド](docs/ja/operations/phase-2-staging.md)を参照してください。
-コード変更不要のCloud Base Profileと完全な導入Wizardはv0.1で整備します。
+`pnpm opap setup --profile cloud-base`を実行すると、配置計画と事前確認を表示します。
+確認後に`--apply`を付けると、D1とR2の作成または再利用、既存D1のBackup、Migration、設定済みSecretの登録、配置、配置状態の確認まで実行します。
+
+案内付きInstallerは、Windowsでは`./install.ps1`、macOSとLinuxでは`sh ./install.sh`を実行します。
+対象Cloudflare Accountを変更する準備ができた場合だけ`--apply`を付けます。
+Resource ID、Secret、Migration Backupを確認した後だけ`--apply`を付けます。
+このコマンドは既存のAccess Team Domain、Tunnel、Application、Policyを変更しません。
 
 ## 費用とプライバシー
 
@@ -96,6 +105,7 @@ pnpm check
 
 ## 文書
 
+- [OPAPセットアップウィザードの監査](docs/ja/operations/installer-security.md)
 - [アーキテクチャ](docs/ja/architecture/overview.md)
 - [脅威モデル](docs/ja/security/threat-model.md)
 - [データ処理方針](docs/ja/security/data-handling.md)
@@ -104,6 +114,7 @@ pnpm check
 - [Phase 3 Connector](docs/ja/operations/phase-3-connectors.md)
 - [Phase 4 Knowledge API](docs/ja/operations/phase-4-knowledge.md)
 - [Google・GitHub Provider設定](docs/ja/operations/connector-provider-setup.md)
+- [Phase 5の運用とPlugin](docs/ja/operations/phase-5-beta.md)
 - [多言語対応](docs/ja/contributing/localization.md)
 
 ## セキュリティとライセンス

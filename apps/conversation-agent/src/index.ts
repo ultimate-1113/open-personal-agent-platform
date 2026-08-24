@@ -186,6 +186,11 @@ export class ConversationAgent {
     this.#env = env;
     this.#sql = state.storage.sql;
     this.#sql.exec(`
+      CREATE TABLE IF NOT EXISTS schema_metadata (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        schema_version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS conversation (
         conversation_id TEXT PRIMARY KEY,
         principal_id TEXT NOT NULL,
@@ -240,6 +245,9 @@ export class ConversationAgent {
         expires_at TEXT NOT NULL
       );
     `);
+    const schema = firstRow(this.#sql.exec<{ schema_version: number }>(
+      "SELECT schema_version FROM schema_metadata WHERE singleton = 1",
+    ));
     const taskColumns = [...this.#sql.exec<{ name: string }>("PRAGMA table_info(tasks)")];
     if (!taskColumns.some((column) => column.name === "description")) {
       this.#sql.exec("ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''");
@@ -257,10 +265,21 @@ export class ConversationAgent {
         this.#sql.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
       }
     }
+    if (!schema || schema.schema_version < 2) {
+      this.#sql.exec(
+        `INSERT INTO schema_metadata (singleton, schema_version, updated_at) VALUES (1, 2, ?)
+         ON CONFLICT(singleton) DO UPDATE SET schema_version = 2, updated_at = excluded.updated_at`,
+        new Date().toISOString(),
+      );
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if ((request.method === "POST" || request.method === "PATCH") &&
+      this.#sql.databaseSize >= 500 * 1024 * 1024) {
+      return Response.json({ code: "STORAGE_BUDGET_REACHED" }, { status: 507 });
+    }
     if (request.method === "POST" && path === "/initialize") {
       const value: unknown = await request.json().catch(() => null);
       if (!isInitializeInput(value)) {
@@ -269,6 +288,10 @@ export class ConversationAgent {
       return this.#initialize(value);
     }
     if (request.method === "GET" && path === "/state") return this.#state();
+    if (request.method === "GET" && path === "/metadata") return this.#metadata();
+    if (request.method === "DELETE" && path === "/delete") {
+      return this.#durableState.blockConcurrencyWhile(() => this.#deleteConversation());
+    }
     if (request.method === "GET" && path === "/exchange/replay") {
       const idempotencyKey = new URL(request.url).searchParams.get("idempotencyKey");
       if (!idempotencyKey) {
@@ -419,6 +442,31 @@ export class ConversationAgent {
       now,
     );
     return Response.json(response);
+  }
+
+  #metadata(): Response {
+    const conversation = firstRow(this.#sql.exec<ConversationRow>(
+      `SELECT conversation_id, principal_id, created_at, updated_at FROM conversation LIMIT 1`,
+    ));
+    return conversation
+      ? Response.json({
+          conversationId: conversation.conversation_id,
+          principalId: conversation.principal_id,
+          createdAt: conversation.created_at,
+          updatedAt: conversation.updated_at,
+          databaseSizeBytes: this.#sql.databaseSize,
+          schemaVersion: 2,
+        })
+      : Response.json({ code: "NOT_FOUND" }, { status: 404 });
+  }
+
+  async #deleteConversation(): Promise<Response> {
+    const conversation = firstRow(this.#sql.exec<ConversationRow>(
+      `SELECT conversation_id, principal_id, created_at, updated_at FROM conversation LIMIT 1`,
+    ));
+    if (!conversation) return Response.json({ code: "NOT_FOUND" }, { status: 404 });
+    await this.#durableState.storage.deleteAll();
+    return Response.json({ conversationId: conversation.conversation_id, deleted: true });
   }
 
   #state(): Response {

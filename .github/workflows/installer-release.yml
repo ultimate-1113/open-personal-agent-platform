@@ -1,0 +1,100 @@
+name: Installer release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-alpha.*"
+      - "v*-beta.*"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, target: win, arch: x64 }
+          - { name: linux-x64, os: ubuntu-latest, target: linux, arch: x64 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: linux, arch: arm64 }
+          - { name: macos-arm64, os: macos-14, target: mac, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      HAS_WINDOWS_SIGNING: ${{ secrets.WIN_CSC_LINK != '' && secrets.WIN_CSC_KEY_PASSWORD != '' }}
+      HAS_MAC_SIGNING: ${{ secrets.MAC_CSC_LINK != '' && secrets.MAC_CSC_KEY_PASSWORD != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          version: 11.22.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm installer:bundle
+      - run: pnpm installer:metadata
+      - name: Package signed Windows installer
+        if: matrix.target == 'win' && env.HAS_WINDOWS_SIGNING == 'true'
+        run: |
+          pnpm installer:signing-status windows signed
+          pnpm --filter @opap/installer exec electron-builder --win --${{ matrix.arch }} --publish never
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - name: Package unsigned Windows installer
+        if: matrix.target == 'win' && env.HAS_WINDOWS_SIGNING != 'true'
+        run: |
+          pnpm installer:signing-status windows unsigned
+          pnpm --filter @opap/installer exec electron-builder --win --${{ matrix.arch }} --publish never
+      - name: Package signed and notarized macOS installer
+        if: matrix.target == 'mac' && env.HAS_MAC_SIGNING == 'true'
+        run: |
+          pnpm installer:signing-status macos signed
+          pnpm --filter @opap/installer exec electron-builder --mac --${{ matrix.arch }} --publish never -c.mac.hardenedRuntime=true -c.mac.notarize=true
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Package unsigned macOS development installer
+        if: matrix.target == 'mac' && env.HAS_MAC_SIGNING != 'true'
+        run: |
+          pnpm installer:signing-status macos unsigned
+          pnpm --filter @opap/installer exec electron-builder --mac --${{ matrix.arch }} --publish never -c.mac.identity=null -c.mac.hardenedRuntime=false -c.mac.notarize=false
+      - name: Package Linux installer
+        if: matrix.target == 'linux'
+        run: |
+          pnpm installer:signing-status linux unsigned
+          pnpm --filter @opap/installer exec electron-builder --linux --${{ matrix.arch }} --publish never
+      - run: pnpm installer:finalize
+      - name: Verify embedded release inputs
+        run: pnpm installer:verify
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: apps/installer/release/*
+      - uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
+        with:
+          subject-path: apps/installer/resources/opap-deployment-bundle.tgz
+          sbom-path: apps/installer/resources/opap-deployment-bundle.cdx.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: opap-setup-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            apps/installer/release/*
+            apps/installer/resources/SHA256SUMS
+            apps/installer/resources/opap-installer.cdx.json
+            apps/installer/resources/release.json
+            verify.ps1
+            verify.sh

@@ -1,10 +1,22 @@
 {
   "name": "@opap/knowledge-api",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run" },
-  "dependencies": { "@opap/contracts": "workspace:*", "zod": "^4.1.13" },
-  "devDependencies": { "typescript": "^5.9.3", "vitest": "^4.0.18" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@opap/contracts": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
 }

@@ -1,0 +1,50 @@
+{
+  "appId": "dev.opap.setup.test",
+  "productName": "Open Personal Agent Setup Test",
+  "extraMetadata": {
+    "opapInstallerTarget": "test"
+  },
+  "asar": true,
+  "files": [
+    "dist/**/*",
+    "dist-main/**/*",
+    "package.json",
+    "resources/**/*",
+    "!node_modules/**/*",
+    "!resources/node-runtime/**/*",
+    "!resources/node-runtime-deps/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "../../deployments/targets",
+      "to": "targets"
+    },
+    {
+      "from": "resources/node-runtime",
+      "to": "node-runtime"
+    },
+    {
+      "from": "resources/node-runtime-deps/node_modules",
+      "to": "node-runtime/node_modules"
+    }
+  ],
+  "directories": {
+    "output": "release-test"
+  },
+  "win": {
+    "target": ["portable", "nsis"]
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  },
+  "linux": {
+    "target": ["AppImage"],
+    "category": "Utility"
+  },
+  "mac": {
+    "target": ["dmg"],
+    "hardenedRuntime": false
+  },
+  "publish": null
+}

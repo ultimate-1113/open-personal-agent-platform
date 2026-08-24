@@ -1,0 +1,18 @@
+{
+  "name": "@opap/plugin-runtime-worker",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --containers-rollout=none --outdir dist",
+    "build:container": "docker build -f Dockerfile .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.13.0-next.738.2",
+    "@opap/contracts": "workspace:*",
+    "@opap/cost-control": "workspace:*",
+    "@opap/plugin-sdk": "workspace:*",
+    "@opap/security": "workspace:*"
+  }
+}
