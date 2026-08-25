@@ -6,6 +6,7 @@ export type DeploymentTarget = {
   apiVersion: "opap.dev/deployment-target/v1alpha1";
   id: "test" | "staging" | "production";
   deploymentName: string;
+  deploymentId?: string;
   environment: string;
   profile: SetupProfile;
   providers: {
@@ -35,6 +36,7 @@ export type SetupRequest = {
   profile: SetupProfile;
   accountId: string;
   environment: string;
+  deploymentId?: string;
   providerSelections: ProviderSelection[];
   ownerBootstrap?: ReturnType<typeof validateOwnerBootstrapConfiguration>;
   dryRun: boolean;
@@ -89,6 +91,7 @@ export type InstallationLedger = {
 
 export type WranglerConfig = {
   name?: string;
+  keep_vars?: boolean;
   d1_databases?: Array<{ binding: string; database_name: string; database_id?: string; migrations_dir?: string }>;
   r2_buckets?: Array<{ binding: string; bucket_name: string }>;
   services?: Array<{ binding: string; service: string; entrypoint?: string }>;
@@ -112,6 +115,23 @@ export function validateDeploymentName(value: string): string {
 export function validateEnvironment(value: string): string {
   if (!environmentPattern.test(value)) throw new Error("Invalid deployment environment");
   return value;
+}
+
+export function orderWorkersForDeployment(workers: readonly string[]): string[] {
+  const ordered = workers.filter((worker) => worker !== "plugin-runtime-worker");
+  if (!workers.includes("plugin-runtime-worker")) return ordered;
+  const assistantIndex = ordered.indexOf("assistant-worker");
+  ordered.splice(assistantIndex < 0 ? ordered.length : assistantIndex, 0, "plugin-runtime-worker");
+  return ordered;
+}
+
+export function additionalSecretNamesForExistingWorker(input: {
+  worker: string;
+  dynamicPluginEnabled: boolean;
+}): string[] {
+  return input.dynamicPluginEnabled && input.worker === "assistant-worker"
+    ? ["PLUGIN_INVOCATION_SIGNING_KEY"]
+    : [];
 }
 
 export function validateDeploymentTarget(value: unknown): DeploymentTarget {
@@ -147,8 +167,14 @@ export function validateDeploymentTarget(value: unknown): DeploymentTarget {
     }
     return Object.fromEntries(entries);
   };
+  if (input["deploymentId"] !== undefined &&
+    (typeof input["deploymentId"] !== "string" ||
+      !/^deployment:[a-z0-9][a-z0-9:-]{1,126}[a-z0-9]$/u.test(input["deploymentId"]))) {
+    throw new Error("Invalid deployment target ID");
+  }
   return { apiVersion: input["apiVersion"], id: input["id"], profile: input["profile"],
     deploymentName: validateDeploymentName(input["deploymentName"]),
+    ...(typeof input["deploymentId"] === "string" ? { deploymentId: input["deploymentId"] } : {}),
     environment: validateEnvironment(input["environment"]), providers: {
       aiSearch: providers["aiSearch"] as boolean,
       discord: providers["discord"] as boolean,
@@ -249,7 +275,8 @@ export function transformWranglerConfig(input: WranglerConfig, request: SetupReq
   }
   if (config.vars?.["ENVIRONMENT"] !== undefined) config.vars["ENVIRONMENT"] = request.environment;
   if (config.vars?.["DEPLOYMENT_ID"] !== undefined) {
-    config.vars["DEPLOYMENT_ID"] = `deployment:${request.deploymentName}:${request.environment}`;
+    config.vars["DEPLOYMENT_ID"] = request.deploymentId ??
+      `deployment:${request.deploymentName}:${request.environment}`;
   }
   const owner = request.ownerBootstrap;
   if (owner && config.vars) {
@@ -302,4 +329,15 @@ export function sanitizeLogFields(fields: Record<string, unknown>): Record<strin
 
 export function isAlreadyAbsentCloudflareError(message: string): boolean {
   return /(does not exist|not found|couldn't find|\[code:\s*10090\])/iu.test(message);
+}
+
+export function shouldBackupD1(input: {
+  wasPresentAtStart: boolean;
+  previousLedgerStatus?: InstallationLedger["status"] | undefined;
+  previousOwnership?: ManagedResource["ownership"] | undefined;
+}): boolean {
+  if (!input.wasPresentAtStart) return false;
+  const incompleteInstallerRun = input.previousOwnership === "created"
+    && ["planned", "installing", "failed", "removed"].includes(input.previousLedgerStatus ?? "");
+  return !incompleteInstallerRun;
 }

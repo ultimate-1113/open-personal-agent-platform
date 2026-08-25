@@ -16,6 +16,7 @@ export type InstallerBridge = {
     localDataPath: string;
     ownerEmail: string; accessTeamDomain: string; accessAudience: string; ownerTimeZone: string;
     aiGatewayId: string; action?: "install" | "update" | "repair" }) => Promise<unknown>;
+  onInstallProgress: (callback: (value: { stage: string; progress: number; message: string }) => void) => void;
   authenticateCloudflare: () => Promise<unknown>;
   importProvider: (input: { deploymentName: string; provider: "google" | "github" | "discord" }) => Promise<unknown>;
   createGitHubApp: (input: { deploymentName: string; oauthCallbackUrl: string }) => Promise<unknown>;
@@ -34,6 +35,9 @@ const bridge: InstallerBridge = {
   openAccessDashboard: () => ipcRenderer.invoke("installer:open-access-dashboard") as Promise<boolean>,
   saveSbom: () => ipcRenderer.invoke("installer:save-sbom") as Promise<boolean>,
   install: (input) => ipcRenderer.invoke("installer:install", input) as Promise<unknown>,
+  onInstallProgress: (callback) => { ipcRenderer.on("installer:install-progress", (_event, value: unknown) => {
+    callback(value as { stage: string; progress: number; message: string });
+  }); },
   authenticateCloudflare: () => ipcRenderer.invoke("installer:authenticate-cloudflare") as Promise<unknown>,
   importProvider: (input) => ipcRenderer.invoke("installer:import-provider", input) as Promise<unknown>,
   createGitHubApp: (input) => ipcRenderer.invoke("installer:create-github-app", input) as Promise<unknown>,

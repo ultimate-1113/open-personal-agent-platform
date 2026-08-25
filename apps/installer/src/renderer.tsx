@@ -5,19 +5,21 @@ import "./styles.css";
 type Overview = { release: { version: string; commit: string; codeSigning?: { signed: boolean; notarized: boolean } };
   unsigned: boolean; telemetry: boolean; sourceUrl: string | null; networkHosts: string[];
   secretPurposes: Record<string, string>; plan: Array<{ stage: string; progress: number }> };
-type Configuration = { targetId: "test" | "production"; deploymentName: string;
-  profile: "cloud-base" | "cloud-base-dynamic"; productName: string; defaultDataPath: string };
+type Configuration = { targetId: "test" | "staging" | "production"; deploymentName: string;
+  profile: "cloud-base" | "cloud-base-dynamic"; productName: string; defaultDataPath: string;
+  providers: { google: boolean; github: boolean; discord: boolean } };
 type Provider = "google" | "github" | "discord";
 
 const text = {
   ja: {
-    title: "セットアップ", install: "インストール", audit: "監査", language: "言語", back: "戻る", next: "次へ",
+    title: "セットアップ", install: "インストール", audit: "監査", language: "Language", back: "戻る", next: "次へ",
     loading: "セットアップを準備しています…", startupFailed: "セットアップを開始できませんでした",
     unsigned: "未署名のAlpha版", unsignedHelp: "実行前に配布元、ハッシュ、Build Provenanceを確認してください。",
     connectTitle: "Cloudflareへ接続", connectHelp: "最初に配置先アカウントへ接続します。接続が完了するまで設定入力はありません。",
     connect: "Cloudflareへ接続", connecting: "ブラウザで認証してください…", connected: "接続済み", notConnected: "未接続", failed: "接続できませんでした",
     authHelp: "ブラウザ側の認証を完了してから、もう一度実行してください。",
     locationTitle: "配置情報", locationHelp: "Cloudflare上に作る名前はテスト版で固定済みです。ローカル保存先には設定台帳、Export、回復情報を保存します。",
+    existingDetected: "既存の実運用配置を検出しました。このSetupから安全に更新できます。",
     deploymentName: "Cloudflare上の配置名", profile: "構成", localPath: "ローカル保存先", choose: "フォルダーを選択",
     cloudBase: "Cloud Base（ベータ）", dynamic: "Cloud Base Dynamic（実験的）",
     ownerTitle: "Owner", ownerHelp: "この配置を利用する本人を指定します。通常入力するのはこのメールアドレスだけです。",
@@ -33,6 +35,7 @@ const text = {
     optional: "Google・GitHub・Discord（後から設定可能）", optionalHelp: "初回には不要です。インストール後にも接続できます。",
     notImported: "未取込", importJson: "JSONを取り込む", githubCallback: "GitHub OAuth Callback URL", createGithub: "GitHub Appを作成",
     planned: "実行予定の詳細", dryRun: "Dry Runを保存", repair: "修復", update: "更新", create: "作成する", notStarted: "未開始",
+    progress: "実行状況", elapsed: "経過時間",
     missing: "必須項目が未入力です。", build: "Build情報", network: "許可された通信先", generated: "生成するSecret",
     version: "Version", commit: "Commit", signing: "Code署名", signed: "検証済み", notSigned: "未署名", telemetry: "Telemetry",
     source: "Source Commitを開く", sbom: "SBOMを保存", maintenance: "保守・削除", remove: "配置を削除",
@@ -46,6 +49,7 @@ const text = {
     connectHelp: "Connect the destination account first. No configuration is requested until this succeeds.", connect: "Connect Cloudflare",
     connecting: "Complete authentication in your browser…", connected: "Connected", notConnected: "Not connected", failed: "Connection failed",
     authHelp: "Complete browser authentication and try again.", locationTitle: "Deployment", locationHelp: "The Cloudflare resource name is fixed in this test build. The local folder stores the ledger, exports, and recovery information.",
+    existingDetected: "An existing operational deployment was detected. This Setup can update it safely.",
     deploymentName: "Cloudflare deployment name", profile: "Profile", localPath: "Local data folder", choose: "Choose folder",
     cloudBase: "Cloud Base (beta)", dynamic: "Cloud Base Dynamic (experimental)", ownerTitle: "Owner",
     ownerHelp: "Specify the person who will use this deployment. Normally, this email is the only value you enter.", ownerEmail: "Owner email",
@@ -59,6 +63,7 @@ const text = {
     optional: "Google, GitHub, and Discord (set up later)", optionalHelp: "They are not required initially and can be connected after installation.",
     notImported: "Not imported", importJson: "Import JSON", githubCallback: "GitHub OAuth callback URL", createGithub: "Create GitHub App",
     planned: "Planned operation details", dryRun: "Save dry run", repair: "Repair", update: "Update", create: "Create", notStarted: "Not started",
+    progress: "Progress", elapsed: "Elapsed",
     missing: "Required values are missing.", build: "Build identity", network: "Allowed network destinations", generated: "Generated secrets",
     version: "Version", commit: "Commit", signing: "Code signing", signed: "Verified", notSigned: "Unsigned", telemetry: "Telemetry",
     source: "Open source commit", sbom: "Save SBOM", maintenance: "Maintenance and removal", remove: "Remove deployment",
@@ -68,7 +73,7 @@ const text = {
 } as const;
 
 function App() {
-  const [locale, setLocale] = useState<"ja" | "en">(() => navigator.language.toLowerCase().startsWith("ja") ? "ja" : "en");
+  const [locale, setLocale] = useState<"ja" | "en">("ja");
   const t = text[locale];
   const [overview, setOverview] = useState<Overview>();
   const [config, setConfig] = useState<Configuration>();
@@ -90,6 +95,10 @@ function App() {
   const [startupError, setStartupError] = useState<string>();
   const [exportConfirmed, setExportConfirmed] = useState(false);
   const [maintenanceResult, setMaintenanceResult] = useState<string>();
+  const [adoptedExisting, setAdoptedExisting] = useState(false);
+  const [installProgress, setInstallProgress] = useState<{ stage: string; progress: number; message: string }>();
+  const [installStartedAt, setInstallStartedAt] = useState<number>();
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const initializeVault = async (deploymentName: string) => {
     try {
@@ -99,8 +108,14 @@ function App() {
   };
   useEffect(() => { void Promise.all([window.opapInstaller.getOverview(), window.opapInstaller.getConfiguration()]).then(([a, b]) => {
     const next = b as Configuration; setOverview(a as Overview); setConfig(next); setDataPath(next.defaultDataPath); document.title = next.productName;
-    void initializeVault(next.deploymentName);
+    setProviders(next.providers);
   }).catch((error: unknown) => setStartupError(error instanceof Error ? error.message : "Startup failed")); }, []);
+  useEffect(() => { window.opapInstaller.onInstallProgress((value) => setInstallProgress(value)); }, []);
+  useEffect(() => {
+    if (!installStartedAt) return;
+    const timer = window.setInterval(() => setElapsedSeconds(Math.floor((Date.now() - installStartedAt) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [installStartedAt]);
 
   if (startupError) return <main className="loading"><h2>{t.startupFailed}</h2><p>{startupError}</p></main>;
   if (!overview || !config) return <main className="loading">{t.loading}</main>;
@@ -108,16 +123,31 @@ function App() {
   const authenticate = () => {
     setCloudflare("working"); setAuthError(undefined);
     void window.opapInstaller.authenticateCloudflare().then((value) => {
-      const auth = value as { status: string; errorCode?: string; detail?: string };
-      if (auth.status === "authenticated") { setCloudflare("ready"); setStep(1); }
+      const auth = value as { status: string; errorCode?: string; detail?: string;
+        ownerBootstrap?: typeof owner; configuration?: Configuration; adoptedExisting?: boolean };
+      if (auth.status === "authenticated") {
+        if (auth.ownerBootstrap) setOwner(auth.ownerBootstrap);
+        if (auth.configuration) {
+          setConfig(auth.configuration); setDataPath(auth.configuration.defaultDataPath);
+          setProviders(auth.configuration.providers); document.title = auth.configuration.productName;
+          setVaultReady(false); void initializeVault(auth.configuration.deploymentName);
+          void window.opapInstaller.getOverview().then((value) => setOverview(value as Overview));
+        }
+        setAdoptedExisting(auth.adoptedExisting === true);
+        setCloudflare("ready"); setStep(1);
+      }
       else { setCloudflare("failed"); setAuthError(auth.detail ?? auth.errorCode ?? "CLOUDFLARE_AUTH_FAILED"); }
     }).catch((error: unknown) => { setCloudflare("failed"); setAuthError(error instanceof Error ? error.message : "CLOUDFLARE_AUTH_FAILED"); });
   };
   const install = (action: "install" | "update" | "repair") => {
-    setResult(`${action}…`);
+    setResult(`${action}…`); setInstallProgress({ stage: "preflight", progress: 0, message: "Starting setup" });
+    setElapsedSeconds(0); setInstallStartedAt(Date.now());
     void window.opapInstaller.install({ deploymentName: config.deploymentName, profile: config.profile, localDataPath: dataPath,
       ...providers, ...owner, action }).then((value) => { const next = value as { status: string; errorCode?: string; detail?: string };
-      setResult(next.detail ? `${next.status}: ${next.detail}` : next.errorCode ? `${next.status}: ${next.errorCode}` : next.status); });
+      setResult(next.detail ? `${next.status}: ${next.detail}` : next.errorCode ? `${next.status}: ${next.errorCode}` : next.status);
+      if (next.status === "active") setInstallProgress({ stage: "complete", progress: 100, message: "Completed" });
+      setInstallStartedAt(undefined);
+    });
   };
   const canNext = [cloudflare === "ready", Boolean(dataPath), Boolean(owner.ownerEmail), Boolean(owner.accessTeamDomain && owner.accessAudience), true][step];
   const canInstall = cloudflare === "ready" && vaultReady && dataPath && owner.ownerEmail && owner.accessTeamDomain && owner.accessAudience;
@@ -132,6 +162,7 @@ function App() {
         {cloudflare !== "ready" && <button className="primary" disabled={cloudflare === "working"} onClick={authenticate}>{cloudflare === "working" ? t.connecting : t.connect}</button>}</div>
       {cloudflare === "failed" && <div className="error"><p>{t.authHelp}</p>{diagnostic(authError ?? "CLOUDFLARE_AUTH_FAILED")}</div>}</section>,
     <section className="wizard-page" key="location"><span className="step-number">2 / 5</span><h2>{t.locationTitle}</h2><p>{t.locationHelp}</p>
+      {adoptedExisting && <p className="notice"><strong>{t.existingDetected}</strong></p>}
       <dl className="summary"><dt>{t.deploymentName}</dt><dd><code>{config.deploymentName}</code></dd><dt>{t.profile}</dt><dd>{config.profile === "cloud-base" ? t.cloudBase : t.dynamic}</dd></dl>
       <label>{t.localPath}<div className="path-row"><input value={dataPath} readOnly/><button onClick={() => { void window.opapInstaller.selectDataPath(dataPath).then((value) => { if (value) setDataPath(value); }); }}>{t.choose}</button></div></label></section>,
     <section className="wizard-page" key="owner"><span className="step-number">3 / 5</span><h2>{t.ownerTitle}</h2><p>{t.ownerHelp}</p>
@@ -153,14 +184,17 @@ function App() {
           setProviderStatus((current) => ({ ...current, [provider]: next.label ?? next.status })); if (next.status === "ready") setProviders((current) => ({ ...current, [provider]: true })); }); }}>{t.importJson}</button>
         {provider === "github" && <div className="provider-extra"><label>{t.githubCallback}<input value={githubCallbackUrl} onChange={(event) => setGithubCallbackUrl(event.target.value)}/></label><button disabled={!githubCallbackUrl} onClick={() => { void window.opapInstaller.createGitHubApp({ deploymentName: config.deploymentName, oauthCallbackUrl: githubCallbackUrl }); }}>{t.createGithub}</button></div>}</div>)}</details>
       <details><summary>{t.planned}</summary><ol>{overview.plan.map((item) => <li key={item.stage}><span>{item.stage}</span><small>{item.progress}%</small></li>)}</ol></details>
+      {installProgress && <section className="install-progress" aria-live="polite"><div><strong>{t.progress}: {installProgress.progress}%</strong>
+        <span>{installProgress.message}</span><small>{t.elapsed}: {elapsedSeconds}s</small></div>
+        <progress max="100" value={installProgress.progress}>{installProgress.progress}%</progress></section>}
       <div className="final-actions">{result?.startsWith("failed:")
         ? <div className="final-result">{diagnostic(result)}</div>
         : <code>{result ?? (canInstall ? t.notStarted : t.missing)}</code>}
-        <button onClick={() => void window.opapInstaller.saveDryRun(overview)}>{t.dryRun}</button><button disabled={!canInstall} onClick={() => install("repair")}>{t.repair}</button><button disabled={!canInstall} onClick={() => install("update")}>{t.update}</button><button className="primary" disabled={!canInstall} onClick={() => install("install")}>{t.create}</button></div></section>,
+        <button onClick={() => void window.opapInstaller.saveDryRun(overview)}>{t.dryRun}</button><button disabled={!canInstall} onClick={() => install("repair")}>{t.repair}</button><button className="primary" disabled={!canInstall} onClick={() => install(adoptedExisting ? "update" : "install")}>{adoptedExisting ? t.update : t.create}</button></div></section>,
   ];
 
   return <main><header><div><span className="eyebrow">OPEN PERSONAL AGENT</span><h1>{t.title}</h1></div><div className="tabs">
-    <button onClick={() => setLocale(locale === "ja" ? "en" : "ja")}>{t.language}: {locale === "ja" ? "日本語" : "English"}</button>
+    <button onClick={() => setLocale(locale === "ja" ? "en" : "ja")}>{t.language}</button>
     <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>{t.install}</button><button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}>{t.audit}</button></div></header>
     {overview.unsigned && <section className="warning"><strong>{t.unsigned}</strong><span>{t.unsignedHelp}</span></section>}
     {tab === "setup" ? <section className="card wizard">{setupPages[step]}<nav className="wizard-nav"><button disabled={step === 0} onClick={() => setStep((value) => value - 1)}>{t.back}</button>

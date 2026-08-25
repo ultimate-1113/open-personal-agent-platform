@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { assertAllowedUrl, collectSelectedServiceNames, createInstallPlan, isAlreadyAbsentCloudflareError,
-  namespaceWorkerName, sanitizeLogFields,
+import { additionalSecretNamesForExistingWorker, assertAllowedUrl, collectSelectedServiceNames, createInstallPlan,
+  isAlreadyAbsentCloudflareError, orderWorkersForDeployment,
+  namespaceWorkerName, sanitizeLogFields, shouldBackupD1,
   transformWranglerConfig, validateDeploymentName, validateOwnerBootstrapConfiguration,
   validateDeploymentTarget, type SetupRequest } from "./index";
 import { validateEnvironment } from "./index";
@@ -9,6 +10,14 @@ const request: SetupRequest = { action: "install", deploymentName: "opap-test-a1
   profile: "cloud-base", accountId: "account", environment: "staging", providerSelections: [], dryRun: true };
 
 describe("setup engine", () => {
+  it("deploys the Plugin Runtime before the Assistant and adds only its new signing key", () => {
+    expect(orderWorkersForDeployment(["quota-worker", "assistant-worker", "plugin-runtime-worker"]))
+      .toEqual(["quota-worker", "plugin-runtime-worker", "assistant-worker"]);
+    expect(additionalSecretNamesForExistingWorker({ worker: "assistant-worker", dynamicPluginEnabled: true }))
+      .toEqual(["PLUGIN_INVOCATION_SIGNING_KEY"]);
+    expect(additionalSecretNamesForExistingWorker({ worker: "google-gatekeeper", dynamicPluginEnabled: true }))
+      .toEqual([]);
+  });
   it("derives service names from Wrangler configuration instead of folder names", () => {
     expect([...collectSelectedServiceNames([
       { name: "opap-policy-control" },
@@ -53,6 +62,11 @@ describe("setup engine", () => {
     expect(transformed.services?.[0]?.service).toBe("explicit-control");
     expect(transformed.d1_databases?.[0]?.database_name).toBe("explicit-control-db");
   });
+  it("preserves an explicit deployment identity for an existing target", () => {
+    const transformed = transformWranglerConfig({ vars: { DEPLOYMENT_ID: "deployment:default" } },
+      { ...request, deploymentId: "deployment:staging" }, new Set());
+    expect(transformed.vars?.["DEPLOYMENT_ID"]).toBe("deployment:staging");
+  });
   it("rejects unsafe deployment names and destinations", () => {
     expect(() => validateDeploymentName("OPAP_Test")).toThrow();
     expect(() => validateEnvironment("1bad")).toThrow();
@@ -69,6 +83,18 @@ describe("setup engine", () => {
     expect(isAlreadyAbsentCloudflareError("This Worker does not exist on this account. [code: 10090]")).toBe(true);
     expect(isAlreadyAbsentCloudflareError("Couldn't find DB with name opap-test")).toBe(true);
     expect(isAlreadyAbsentCloudflareError("Authentication failed [code: 10000]")).toBe(false);
+  });
+  it("backs up operational D1 data but not databases from an incomplete installer run", () => {
+    expect(shouldBackupD1({ wasPresentAtStart: false })).toBe(false);
+    expect(shouldBackupD1({ wasPresentAtStart: true })).toBe(true);
+    expect(shouldBackupD1({ wasPresentAtStart: true, previousLedgerStatus: "active",
+      previousOwnership: "created" })).toBe(true);
+    expect(shouldBackupD1({ wasPresentAtStart: true, previousLedgerStatus: "installing",
+      previousOwnership: "created" })).toBe(false);
+    expect(shouldBackupD1({ wasPresentAtStart: true, previousLedgerStatus: "failed",
+      previousOwnership: "created" })).toBe(false);
+    expect(shouldBackupD1({ wasPresentAtStart: true, previousLedgerStatus: "installing",
+      previousOwnership: "reused" })).toBe(true);
   });
   it("creates a reviewable dry-run plan", () => {
     expect(createInstallPlan(request, ["quota-worker", "assistant-worker"]).map((event) => event.stage))

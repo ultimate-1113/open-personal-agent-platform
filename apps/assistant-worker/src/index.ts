@@ -788,6 +788,8 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
   app.use("/v1/google/*", authorizeConversation);
   app.use("/v1/github", authorizeConversation);
   app.use("/v1/github/*", authorizeConversation);
+  app.use("/v1/plugins", authorizeConversation);
+  app.use("/v1/plugins/*", authorizeConversation);
 
   app.get("/v1/connections", async (context) => {
     const fetchConnections = async (provider: "google" | "github", gatekeeper: Fetcher) => {
@@ -1701,7 +1703,9 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const url = new URL("https://control.internal/internal/v1/settings/preferences");
     url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
     const response = await context.env.CONTROL.fetch(url);
-    if (response.status === 404) return context.json({ timeZone: context.env.OWNER_TIME_ZONE || "UTC" });
+    if (response.status === 404) {
+      return context.json({ timeZone: context.env.OWNER_TIME_ZONE || "UTC", locale: "ja" });
+    }
     return new Response(response.body, response);
   });
 
@@ -1709,16 +1713,21 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
     const idempotencyKey = context.req.header("idempotency-key");
     if (!idempotencyKey) return problem(context.req.raw, 400, "IDEMPOTENCY_KEY_REQUIRED");
     const value: unknown = await context.req.json().catch(() => null);
-    const requestedTimeZone = typeof value === "object" && value !== null && !Array.isArray(value)
-      ? (value as Record<string, unknown>)["timeZone"] : undefined;
+    const body = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown> : {};
+    const requestedTimeZone = body["timeZone"] ?? (context.env.OWNER_TIME_ZONE || "UTC");
     const timeZone = normalizeTimeZone(requestedTimeZone);
+    const locale = body["locale"];
     if (!timeZone) {
       return problem(context.req.raw, 400, "INVALID_TIME_ZONE");
+    }
+    if (locale !== undefined && locale !== "en" && locale !== "ja") {
+      return problem(context.req.raw, 400, "INVALID_LOCALE");
     }
     const url = new URL("https://control.internal/internal/v1/settings/preferences");
     url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
     const response = await context.env.CONTROL.fetch(url, { method: "PATCH",
-      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ timeZone,
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ timeZone, locale,
         principalId: context.get("ownerPrincipalId"), idempotencyKey,
         requestId: context.req.header("cf-ray") ?? crypto.randomUUID(),
       }),
@@ -1979,6 +1988,34 @@ export function createAssistantApp(dependencies: AssistantDependencies) {
         : problem(context.req.raw, 503, "PLUGIN_CONTROL_UNAVAILABLE");
     });
   }
+
+  app.get("/v1/conversations", async (context) => {
+    const url = new URL("https://control.internal/internal/v1/conversations/registry");
+    url.searchParams.set("deploymentId", context.env.DEPLOYMENT_ID);
+    const response = await context.env.CONTROL.fetch(url).catch(() => undefined);
+    if (!response?.ok) {
+      return problem(context.req.raw, 503, "CONVERSATION_REGISTRY_UNAVAILABLE");
+    }
+    const value: unknown = await response.json().catch(() => null);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return problem(context.req.raw, 503, "CONVERSATION_REGISTRY_UNAVAILABLE");
+    }
+    const principalId = context.get("ownerPrincipalId");
+    const conversations = Array.isArray((value as Record<string, unknown>)["conversations"])
+      ? ((value as Record<string, unknown>)["conversations"] as unknown[])
+        .filter((item) => {
+          if (typeof item !== "object" || item === null || Array.isArray(item)) return false;
+          const record = item as Record<string, unknown>;
+          return record["principalId"] === principalId && record["deletedAt"] == null;
+        })
+        .map((item) => {
+          const record = { ...item as Record<string, unknown> };
+          delete record["principalId"];
+          return record;
+        })
+      : [];
+    return context.json({ conversations }, 200, { "Cache-Control": "private, no-store" });
+  });
 
   app.post("/v1/conversations", async (context) => {
     const idempotencyKey = context.req.header("idempotency-key");

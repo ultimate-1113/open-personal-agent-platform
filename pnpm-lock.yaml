@@ -325,6 +325,19 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  examples/dynamic-plugin-text-utilities:
+    dependencies:
+      '@opap/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   examples/public-site-search:
     dependencies:
       '@opap/sdk':

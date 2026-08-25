@@ -5,7 +5,9 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { loadEnvFile, stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
-import { collectSelectedServiceNames, isAlreadyAbsentCloudflareError, transformWranglerConfig, validateDeploymentName, type SetupRequest,
+import { additionalSecretNamesForExistingWorker, collectSelectedServiceNames, isAlreadyAbsentCloudflareError,
+  orderWorkersForDeployment, shouldBackupD1,
+  transformWranglerConfig, validateDeploymentName, type SetupRequest,
   validateOwnerBootstrapConfiguration, type InstallationLedger, type ManagedResource,
   validateDeploymentTarget, type WranglerConfig
   } from "../packages/setup-engine/src/index.ts";
@@ -103,6 +105,7 @@ if (!action) {
       workers = workers.filter((worker) => worker !== "delegated-source-gatekeeper");
     }
   }
+  workers = orderWorkersForDeployment(workers);
   if (process.platform === "win32" && workers.includes("plugin-runtime-worker")
     && !process.env["WRANGLER_DOCKER_BIN"]) {
     const dockerDesktopCli = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
@@ -350,6 +353,8 @@ if (!action) {
     }
     const deploymentEnvironment = process.env["OPAP_ENVIRONMENT"] ?? target?.environment ??
       (selected === "local-dev" ? "development" : "production");
+    const preserveExistingSecrets = process.env["OPAP_PRESERVE_EXISTING_SECRETS"] === "1"
+      && (action === "update" || action === "repair");
     if (!/^[a-z][a-z0-9-]{1,31}$/u.test(deploymentEnvironment)) {
       throw new Error("OPAP_ENVIRONMENT must contain only lowercase letters, numbers, and hyphens");
     }
@@ -370,22 +375,12 @@ if (!action) {
       ownerTimeZone: process.env["OWNER_TIME_ZONE"] ?? "UTC",
       aiGatewayId: process.env["AI_GATEWAY_ID"] ?? "default",
     });
+    const deploymentId = target?.deploymentId ?? `deployment:${deploymentName}:${deploymentEnvironment}`;
     const request: SetupRequest = { action: action === "update" ? "update" : action === "repair" ? "repair" : "install",
     deploymentName, profile: selected === "minimal"
       ? "minimal" : selected === "cloud-base-dynamic" ? "cloud-base-dynamic" : "cloud-base",
     accountId: process.env["CLOUDFLARE_ACCOUNT_ID"] ?? "wrangler-session", environment: deploymentEnvironment,
-    providerSelections, ownerBootstrap, dryRun: false };
-    const requiredProviderValues: Record<string, readonly string[]> = {
-      "google-gatekeeper": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
-      "github-gatekeeper": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],
-      "discord-adapter": ["DISCORD_APPLICATION_ID", "DISCORD_PUBLIC_KEY", "DISCORD_BOT_TOKEN"],
-    };
-    for (const [worker, names] of Object.entries(requiredProviderValues)) {
-      if (!workers.includes(worker)) continue;
-      for (const name of names) {
-        if (!(generatedSecrets[name] ?? process.env[name])) throw new Error(`${name} is required when ${worker} is enabled`);
-      }
-    }
+    deploymentId, providerSelections, ownerBootstrap, dryRun: false };
     const sourceConfigs = new Map<string, WranglerConfig>();
     for (const worker of workers) {
       const sourceConfig = JSON.parse(await readFile(
@@ -416,7 +411,54 @@ if (!action) {
       }
       configs.set(worker, config);
     }
-    const deploymentId = `deployment:${deploymentName}:${deploymentEnvironment}`;
+    const existingWorkers = new Set<string>();
+    for (const config of configs.values()) {
+      if (!config.name) continue;
+      try {
+        capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "list",
+          "--name", config.name, "--json"]);
+        existingWorkers.add(config.name);
+      } catch (error) {
+        if (!(error instanceof Error && isAlreadyAbsentCloudflareError(error.message))) throw error;
+      }
+    }
+    const pluginRuntimeWorkerName = configs.get("plugin-runtime-worker")?.name;
+    const enablingDynamicPlugin = workers.includes("plugin-runtime-worker")
+      && Boolean(pluginRuntimeWorkerName && !existingWorkers.has(pluginRuntimeWorkerName));
+    if (preserveExistingSecrets) {
+      for (const worker of workers) {
+        const workerName = configs.get(worker)?.name;
+        if (workerName && !existingWorkers.has(workerName)
+          && secretTargets.some((target) => target.worker === worker)) {
+          const unavailableSecrets = secretTargets.filter((target) => target.worker === worker
+            && !(generatedSecrets[target.source ?? target.name] ?? process.env[target.name]));
+          if (unavailableSecrets.length > 0) {
+            throw new Error(`Cannot safely adopt missing secret-bearing Worker: ${workerName}`);
+          }
+        }
+      }
+      for (const config of configs.values()) {
+        if (!config.name || !existingWorkers.has(config.name)) continue;
+        config.keep_vars = true;
+        for (const key of ["GOOGLE_CLIENT_ID", "GITHUB_CLIENT_ID", "DISCORD_APPLICATION_ID",
+          "DISCORD_PUBLIC_KEY"] as const) {
+          if (config.vars) delete config.vars[key];
+        }
+      }
+    }
+    const requiredProviderValues: Record<string, readonly string[]> = {
+      "google-gatekeeper": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+      "github-gatekeeper": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],
+      "discord-adapter": ["DISCORD_APPLICATION_ID", "DISCORD_PUBLIC_KEY", "DISCORD_BOT_TOKEN"],
+    };
+    for (const [worker, names] of Object.entries(requiredProviderValues)) {
+      if (!workers.includes(worker)) continue;
+      const workerName = configs.get(worker)?.name;
+      if (preserveExistingSecrets && workerName && existingWorkers.has(workerName)) continue;
+      for (const name of names) {
+        if (!(generatedSecrets[name] ?? process.env[name])) throw new Error(`${name} is required when ${worker} is enabled`);
+      }
+    }
     const generatedConfigName = `.opap.${deploymentName}.wrangler.jsonc`;
     const bootstrapConfigName = `.opap.${deploymentName}.bootstrap.wrangler.jsonc`;
     console.log(`Target environment: ${deploymentEnvironment}; deployment: ${deploymentId}`);
@@ -433,9 +475,27 @@ if (!action) {
         await writeFile(secretsPath, `${JSON.stringify(secretsForWorker(worker))}\n`, { encoding: "utf8", mode: 0o600 });
         await chmod(secretsPath, 0o600).catch(() => undefined);
         restrictTemporarySecretFile(secretsPath);
-        const result = run("corepack", ["pnpm@11.23.0", "--filter", `@opap/${worker}`,
-          "exec", "wrangler", "deploy", "--config", configName, "--secrets-file", secretsPath]);
+        const workerName = configs.get(worker)?.name;
+        const retainExistingSecrets = preserveExistingSecrets && Boolean(workerName && existingWorkers.has(workerName));
+        const deployArguments = ["pnpm@11.23.0", "--filter", `@opap/${worker}`,
+          "exec", "wrangler", "deploy", "--config", configName];
+        if (!retainExistingSecrets) deployArguments.push("--secrets-file", secretsPath);
+        const result = run("corepack", deployArguments);
         if (result.status !== 0) throw new Error(`Deployment failed: ${worker}`);
+        const additionalSecretNames = retainExistingSecrets ? additionalSecretNamesForExistingWorker({ worker,
+          dynamicPluginEnabled: enablingDynamicPlugin }) : [];
+        if (additionalSecretNames.length > 0) {
+          const additionalSecrets = Object.fromEntries(additionalSecretNames.map((name) => {
+            const value = generatedSecrets[name];
+            if (!value) throw new Error(`${name} is required for Dynamic Plugin support`);
+            return [name, value];
+          }));
+          await writeFile(secretsPath, `${JSON.stringify(additionalSecrets)}\n`,
+            { encoding: "utf8", mode: 0o600 });
+          const secretResult = run("corepack", ["pnpm@11.23.0", "exec", "wrangler", "secret", "bulk",
+            secretsPath, "--config", `apps/${worker}/${configName}`]);
+          if (secretResult.status !== 0) throw new Error(`Secret registration failed: ${worker}`);
+        }
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
@@ -510,8 +570,10 @@ if (!action) {
         platformVersion: "0.1.0-beta.1", createdAt: startedAt, updatedAt: new Date().toISOString(), status,
         resources: [
           ...[...configs.values()].flatMap((config) => config.name ? [{ provider: "cloudflare", kind: "worker",
-            id: config.name, name: config.name, ownership: previousResources.get(`worker:${config.name}`)?.ownership ?? "created",
-            deletion: previousResources.get(`worker:${config.name}`)?.deletion ?? "automatic" }] : []),
+            id: config.name, name: config.name, ownership: previousResources.get(`worker:${config.name}`)?.ownership
+              ?? (existingWorkers.has(config.name) ? "reused" : "created"),
+            deletion: previousResources.get(`worker:${config.name}`)?.deletion
+              ?? (existingWorkers.has(config.name) ? "retain" : "automatic") }] : []),
           ...[...requiredDatabases].map((name) => ({ provider: "cloudflare", kind: "d1", id: databaseIds.get(name) ?? name,
             name, ownership: previousResources.get(`d1:${name}`)?.ownership ?? (existingDatabases.has(name) ? "reused" : "created"),
             deletion: previousResources.get(`d1:${name}`)?.deletion ?? (existingDatabases.has(name) ? "retain" : "automatic") })),
@@ -541,18 +603,27 @@ if (!action) {
     console.log(`Resolved resource bindings were written to ignored ${generatedConfigName} files.`);
 
     const backupStamp = new Date().toISOString().replaceAll(":", "-");
-    const backupDirectory = `.opap/backups/${backupStamp}`;
-    await mkdir(new URL(`../${backupDirectory}/`, import.meta.url), { recursive: true });
+    const backupDirectory = process.env["OPAP_BACKUP_DIRECTORY"]
+      ? join(process.env["OPAP_BACKUP_DIRECTORY"], backupStamp)
+      : join(process.cwd(), ".opap", "backups", backupStamp);
+    await mkdir(backupDirectory, { recursive: true });
     for (const name of requiredDatabases) {
-      if (!existingDatabases.has(name)) continue;
+      const previousDatabase = previousResources.get(`d1:${name}`);
+      if (!shouldBackupD1({ wasPresentAtStart: existingDatabases.has(name),
+        previousLedgerStatus: previousLedger?.status, previousOwnership: previousDatabase?.ownership })) {
+        if (existingDatabases.has(name)) console.log(`Skipping backup for incomplete-install D1 ${name}`);
+        continue;
+      }
       console.log(`Backing up D1 ${name}`);
       const bookmark = capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1",
         "time-travel", "info", name, "--json"]);
-      await writeFile(new URL(`../${backupDirectory}/${name}.bookmark.json`, import.meta.url),
-        bookmark, "utf8");
-      if (!succeeds("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1", "export",
-        name, "--remote", "--skip-confirmation", `--output=${backupDirectory}/${name}.sql`])) {
-        throw new Error(`D1 export failed: ${name}`);
+      await writeFile(join(backupDirectory, `${name}.bookmark.json`), bookmark, "utf8");
+      try {
+        capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1", "export",
+          name, "--remote", "--skip-confirmation", `--output=${join(backupDirectory, `${name}.sql`)}`]);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Wrangler failed";
+        throw new Error(`D1 export failed: ${name}: ${detail}`, { cause: error });
       }
     }
 

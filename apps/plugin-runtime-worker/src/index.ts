@@ -199,6 +199,7 @@ async function invoke(request: Request, env: Bindings): Promise<Response> {
   });
   if (!acquire.ok) return new Response(acquire.body, acquire);
   const startedAt = Date.now();
+  let runtimeStage = "reserve-container";
   let containerReservation: { quota: DurableObjectStub; reservationIds: string[] } | undefined;
   const executionId = `plugin-execution:${crypto.randomUUID()}`;
   const finish = async (response: Response, outcome: "success" | "failure" | "timeout" | "unknown",
@@ -219,6 +220,7 @@ async function invoke(request: Request, env: Bindings): Promise<Response> {
     const reserved = await reserveContainer(env, value.invocationToken);
     if (reserved instanceof Response) return reserved;
     containerReservation = reserved;
+    runtimeStage = "read-artifact";
     const artifact = await env.PRIVATE_R2.get(artifactKey(value.deploymentId, value.archiveSha256));
     if (!artifact) return finish(responseCode(404, "PLUGIN_ARTIFACT_NOT_FOUND"),
       "failure", "PLUGIN_ARTIFACT_NOT_FOUND");
@@ -226,16 +228,23 @@ async function invoke(request: Request, env: Bindings): Promise<Response> {
     const bundle = entries.find((entry) => entry.path === value.entrypoint && entry.kind === "file");
     if (!bundle) return finish(responseCode(409, "PLUGIN_ENTRYPOINT_NOT_FOUND"),
       "failure", "PLUGIN_ENTRYPOINT_NOT_FOUND");
-    const sandboxId = `${value.deploymentId}:${value.installationId}`;
+    const sandboxScopeDigest = await digestJson({
+      deploymentId: value.deploymentId,
+      installationId: value.installationId,
+    });
+    const sandboxId = `plugin-${sandboxScopeDigest.slice(0, 56)}`;
+    runtimeStage = "connect-sandbox";
     const sandbox = getSandbox(env.SANDBOX, sandboxId, {
       keepAlive: SANDBOX_LIMITS.keepAlive,
       sleepAfter: `${SANDBOX_LIMITS.sleepAfterSeconds}s`,
     });
     const prefix = `/workspace/opap/${crypto.randomUUID()}`;
+    runtimeStage = "prepare-workspace";
     await sandbox.mkdir(prefix, { recursive: true });
     await sandbox.writeFile(`${prefix}/plugin.mjs`, new Blob([bundle.content as BlobPart]).stream());
     await sandbox.writeFile(`${prefix}/input.json`, JSON.stringify(value.input));
     await sandbox.writeFile(`${prefix}/runner.mjs`, runnerSource);
+    runtimeStage = "execute-plugin";
     const process = await sandbox.exec([
       "node", `${prefix}/runner.mjs`, `${prefix}/plugin.mjs`, `${prefix}/input.json`, value.toolId,
     ], {
@@ -245,6 +254,7 @@ async function invoke(request: Request, env: Bindings): Promise<Response> {
     });
     const output = await process.output({ encoding: "utf8",
       maxBytes: SANDBOX_LIMITS.outputBytes + 1 });
+    runtimeStage = "validate-output";
     if (output.truncated || output.stdout.length > SANDBOX_LIMITS.outputBytes) {
       await process.kill(9).catch(() => undefined);
       return finish(responseCode(413, "PLUGIN_OUTPUT_LIMIT_REACHED"),
@@ -266,7 +276,12 @@ async function invoke(request: Request, env: Bindings): Promise<Response> {
   } catch (error) {
     const code = error instanceof StaleProcessHandleError
       ? "STALE_PROCESS_HANDLE" : "PLUGIN_RUNTIME_UNAVAILABLE";
-    return finish(responseCode(error instanceof StaleProcessHandleError ? 409 : 503, code),
+    const errorName = error instanceof Error ? error.name : "UnknownError";
+    const diagnostic = Response.json({ code, detail: `${runtimeStage}: ${errorName}` }, {
+      status: error instanceof StaleProcessHandleError ? 409 : 503,
+      headers: { "Cache-Control": "no-store" },
+    });
+    return finish(diagnostic,
       "failure", code);
   } finally {
     if (containerReservation) {

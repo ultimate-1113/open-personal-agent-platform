@@ -58,4 +58,28 @@ describe("localization contract", () => {
     expect(app).toContain('role="switch"');
     expect(app).toContain("useTheme()");
   });
+
+  it("keeps Japanese as the default and stores locale through owner preferences", () => {
+    const i18n = readFileSync(resolve(repositoryRoot, "apps/owner-ui/src/i18n.ts"), "utf8");
+    const app = readFileSync(resolve(repositoryRoot, "apps/owner-ui/src/App.tsx"), "utf8");
+    const installer = readFileSync(resolve(repositoryRoot, "apps/installer/src/renderer.tsx"), "utf8");
+
+    expect(i18n).toContain('useState<Locale>("ja")');
+    expect(i18n).not.toContain("opap.locale");
+    expect(en["language.label"]).toBe("Language");
+    expect(ja["language.label"]).toBe("Language");
+    expect(app).toContain('request("/v1/settings/preferences"');
+    expect(app).toContain('JSON.stringify({ locale: nextLocale })');
+    expect(installer).toContain('useState<"ja" | "en">("ja")');
+    expect(installer).toContain(">{t.language}</button>");
+  });
+
+  it("persists the selected workspace tab and follows browser history", () => {
+    const app = readFileSync(resolve(repositoryRoot, "apps/owner-ui/src/App.tsx"), "utf8");
+
+    expect(app).toContain('const lastTabStorageKey = "opap.lastTab"');
+    expect(app).toContain('window.history.pushState({ tab: nextTab }');
+    expect(app).toContain('window.addEventListener("popstate", restoreHistoryTab)');
+    expect(app).toContain('localStorage.getItem(lastTabStorageKey)');
+  });
 });

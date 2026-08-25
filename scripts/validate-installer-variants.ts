@@ -14,9 +14,10 @@ if (!production) throw new Error("Production installer build configuration is mi
 if (packageValue.opapInstallerTarget !== "production" || testValue.extraMetadata?.["opapInstallerTarget"] !== "test") {
   throw new Error("Installer variants must reference explicit production and test targets");
 }
-if (production.appId === testValue.appId || production.productName === testValue.productName ||
-  production.directories?.output === testValue.directories?.output) {
-  throw new Error("Test installer identity and output directory must differ from production");
+const identities = [production, testValue]
+  .map((value) => `${String(value.appId)}\n${String(value.productName)}\n${String(value.directories?.output)}`);
+if (new Set(identities).size !== identities.length) {
+  throw new Error("Installer identities and output directories must differ");
 }
 const common = (value: BuilderConfig): Record<string, unknown> => {
   const copy = structuredClone(value);
@@ -27,4 +28,4 @@ const common = (value: BuilderConfig): Record<string, unknown> => {
 if (!isDeepStrictEqual(common(production), common(testValue))) {
   throw new Error("Installer variants differ in behavior beyond identity, output, and target");
 }
-console.log("Installer variants share one behavior configuration and use separate identities and targets");
+console.log("Production and test installers share behavior and use separate identities and targets");

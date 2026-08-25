@@ -6,16 +6,8 @@ export type Locale = "en" | "ja";
 export const supportedLocales = ["en", "ja"] as const;
 export const catalogs = { en, ja } as const;
 
-const storageKey = "opap.locale";
-
-const isLocale = (value: string | null): value is Locale =>
+export const isLocale = (value: unknown): value is Locale =>
   value !== null && supportedLocales.some((locale) => locale === value);
-
-const initialLocale = (): Locale => {
-  const stored = localStorage.getItem(storageKey);
-  if (isLocale(stored)) return stored;
-  return navigator.language.toLowerCase().startsWith("ja") ? "ja" : "en";
-};
 
 export type Translate = (
   key: MessageKey,
@@ -23,14 +15,13 @@ export type Translate = (
 ) => string;
 
 export function useLocale() {
-  const [locale, setLocaleState] = useState<Locale>(initialLocale);
+  const [locale, setLocaleState] = useState<Locale>("ja");
 
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
 
   const setLocale = useCallback((nextLocale: Locale) => {
-    localStorage.setItem(storageKey, nextLocale);
     setLocaleState(nextLocale);
   }, []);
 

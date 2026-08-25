@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { useLocale, type Locale, type Translate } from "./i18n.js";
+import { isLocale, useLocale, type Locale, type Translate } from "./i18n.js";
 import type { MessageKey } from "./locales/en.js";
 import { useTheme } from "./theme.js";
 
@@ -37,10 +37,13 @@ const api = async (
   });
   const value: unknown = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const title = typeof value === "object" && value !== null
-      ? (value as ApiRecord)["title"]
-      : undefined;
-    throw new Error(typeof title === "string" ? title : requestFailed(response.status));
+    const problem = record(value);
+    const summary = [problem["title"], problem["code"]]
+      .find((item): item is string => typeof item === "string" && item.length > 0);
+    const detail = [problem["detail"], problem["message"]]
+      .find((item): item is string => typeof item === "string" && item.length > 0);
+    throw new Error(summary ? `${summary}${detail && detail !== summary ? `: ${detail}` : ""}`
+      : requestFailed(response.status));
   }
   return typeof value === "object" && value !== null ? value as ApiRecord : {};
 };
@@ -132,9 +135,15 @@ const supportedTimeZones = (): string[] => {
 
 const timeZoneOptions = supportedTimeZones();
 
+const lastTabStorageKey = "opap.lastTab";
+const isTab = (value: string | null): value is Tab =>
+  tabs.some((candidate) => candidate.id === value);
+
 const initialTab = (): Tab => {
   const requested = new URLSearchParams(window.location.search).get("tab");
-  return tabs.some((candidate) => candidate.id === requested) ? requested as Tab : "conversation";
+  if (isTab(requested)) return requested;
+  const stored = localStorage.getItem(lastTabStorageKey);
+  return isTab(stored) ? stored : "conversation";
 };
 
 const scheduleFromForm = (form: FormData, ownerTimeZone: string): ApiRecord | undefined => {
@@ -210,9 +219,11 @@ export function App() {
   const { locale, setLocale, t } = useLocale();
   const { theme, toggleTheme } = useTheme();
   const [tab, setTab] = useState<Tab>(initialTab);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [conversationId, setConversationId] = useState(
     () => localStorage.getItem("opap.conversationId") ?? "",
   );
+  const [conversationRegistryReady, setConversationRegistryReady] = useState(false);
   const [data, setData] = useState<ApiRecord>({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -229,7 +240,10 @@ export function App() {
   const [ownerTimeZone, setOwnerTimeZone] = useState(defaultTimeZone);
   const [ownerTimeZoneDraft, setOwnerTimeZoneDraft] = useState(defaultTimeZone);
   const [pluginInspection, setPluginInspection] = useState<ApiRecord>();
+  const [pluginInvocationResults, setPluginInvocationResults] = useState<Record<string, ApiRecord>>({});
+  const [openPluginTestId, setOpenPluginTestId] = useState("");
   const loadSequence = useRef(0);
+  const preferencesLoaded = useRef(false);
   const conversationList = useRef<HTMLElement>(null);
   const request = useCallback(
     (path: string, init?: RequestInit) =>
@@ -237,11 +251,72 @@ export function App() {
     [t],
   );
 
+  const navigateTab = useCallback((nextTab: Tab) => {
+    localStorage.setItem(lastTabStorageKey, nextTab);
+    if (nextTab !== tab) {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set("tab", nextTab);
+      window.history.pushState({ tab: nextTab }, "", nextUrl);
+      setTab(nextTab);
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.searchParams.get("tab") !== tab) {
+      currentUrl.searchParams.set("tab", tab);
+      window.history.replaceState({ tab }, "", currentUrl);
+    }
+    localStorage.setItem(lastTabStorageKey, tab);
+    const restoreHistoryTab = () => {
+      const requested = new URLSearchParams(window.location.search).get("tab");
+      const restoredTab = isTab(requested) ? requested : "conversation";
+      localStorage.setItem(lastTabStorageKey, restoredTab);
+      setTab(restoredTab);
+      setMobileMenuOpen(false);
+    };
+    window.addEventListener("popstate", restoreHistoryTab);
+    return () => window.removeEventListener("popstate", restoreHistoryTab);
+  }, []);
+
+  useEffect(() => {
+    if (preferencesLoaded.current) return;
+    preferencesLoaded.current = true;
+    let active = true;
+    void request("/v1/settings/preferences").then((preferences) => {
+      if (!active) return;
+      if (isLocale(preferences["locale"])) setLocale(preferences["locale"]);
+      if (typeof preferences["timeZone"] === "string") {
+        setOwnerTimeZone(preferences["timeZone"]);
+        setOwnerTimeZoneDraft(preferences["timeZone"]);
+      }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [request, setLocale]);
+
+  const syncLatestConversation = useCallback(async () => {
+    const registry = await request("/v1/conversations");
+    const latest = rows(registry["conversations"])[0];
+    const latestId = latest && typeof latest["conversationId"] === "string"
+      ? latest["conversationId"] : "";
+    if (!latestId) return;
+    setConversationId((current) => {
+      if (current === latestId) return current;
+      localStorage.setItem("opap.conversationId", latestId);
+      return latestId;
+    });
+  }, [request]);
+
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setError("");
     try {
       let nextData: ApiRecord;
+      if (!conversationRegistryReady &&
+        (tab === "conversation" || tab === "tasks" || tab === "memory")) {
+        if (sequence === loadSequence.current) setData({});
+        return;
+      }
       if (tab === "conversation") {
         nextData = conversationId
           ? await request(`/v1/conversations/${encodeURIComponent(conversationId)}`)
@@ -285,11 +360,26 @@ export function App() {
         setError(localizedError(reason, t, "errors.load"));
       }
     }
-  }, [conversationId, request, t, tab]);
+  }, [conversationId, conversationRegistryReady, request, t, tab]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void syncLatestConversation();
+    };
+    void syncLatestConversation().finally(() => setConversationRegistryReady(true));
+    const interval = window.setInterval(refreshWhenVisible, 15_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [syncLatestConversation]);
 
   useEffect(() => {
     if (tab !== "conversation" || !conversationId) return;
@@ -376,7 +466,7 @@ export function App() {
           });
         } else if (workersAiActive && approvalId &&
           (connectorApprovalMode === "open" || connectorApprovalMode === "auto-read")) {
-          setTab("approvals");
+          navigateTab("approvals");
           return;
         }
       } else if (tab === "tasks") {
@@ -481,7 +571,7 @@ export function App() {
         body: JSON.stringify({ decision }),
       });
       if (result["capabilityId"] === "model.connector-results.send") {
-        setTab("conversation");
+        navigateTab("conversation");
         return;
       }
       await load();
@@ -734,6 +824,24 @@ export function App() {
     }
   };
 
+  const saveOwnerLocale = async (nextLocale: Locale) => {
+    const previousLocale = locale;
+    setLocale(nextLocale);
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await request("/v1/settings/preferences", { method: "PATCH",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ locale: nextLocale }),
+      });
+      if (isLocale(saved["locale"])) setLocale(saved["locale"]);
+    } catch (reason) {
+      setLocale(previousLocale);
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const updateDiscordDestination = async (destination: ApiRecord,
     displayPolicy: string, commandPolicy: string) => {
     setBusy(true);
@@ -745,7 +853,7 @@ export function App() {
           displayPolicy, commandPolicy,
         }),
       });
-      setTab("approvals");
+      navigateTab("approvals");
     } catch (reason) {
       setError(localizedError(reason, t, "errors.connection"));
     } finally {
@@ -863,6 +971,32 @@ export function App() {
         body: JSON.stringify({ inspectionId }) });
       setPluginInspection(undefined);
       await load();
+    } catch (reason) {
+      setError(localizedError(reason, t, "errors.save"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const invokePlugin = async (event: FormEvent<HTMLFormElement>, installationId: string) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    let input: unknown;
+    try {
+      input = JSON.parse(formText(form, "input")) as unknown;
+    } catch {
+      setError(t("plugins.inputInvalid"));
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request(`/v1/plugins/${encodeURIComponent(installationId)}/invoke`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ toolId: formText(form, "toolId"), input }),
+      });
+      setPluginInvocationResults((current) => ({ ...current, [installationId]: result }));
     } catch (reason) {
       setError(localizedError(reason, t, "errors.save"));
     } finally {
@@ -989,8 +1123,22 @@ export function App() {
   const budgetAiUsage = record(budgetUsage["ai"]);
 
   return <div className="shell">
-    <aside>
-      <div className="brand">
+    <div className="brand mobile-brand">
+      <span className="mark">OP</span>
+      <div><strong>Open Personal Agent</strong><small>{t("brand.subtitle")}</small></div>
+    </div>
+    {mobileMenuOpen && <button className="mobile-menu-backdrop" aria-label={t("menu.close")}
+      onClick={() => setMobileMenuOpen(false)} />}
+    <button className="mobile-theme-toggle" type="button" role="switch" aria-checked={theme === "dark"}
+      aria-label={theme === "dark" ? t("theme.switchToLight") : t("theme.switchToDark")}
+      onClick={toggleTheme}><span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span></button>
+    <button className="mobile-menu-toggle" type="button" aria-expanded={mobileMenuOpen}
+      aria-controls="owner-navigation" aria-label={t(mobileMenuOpen ? "menu.close" : "menu.open")}
+      onClick={() => setMobileMenuOpen((open) => !open)}>
+      <span className={`menu-icon ${mobileMenuOpen ? "close" : "hamburger"}`} aria-hidden="true" />
+    </button>
+    <aside id="owner-navigation" className={mobileMenuOpen ? "mobile-open" : ""}>
+      <div className="brand sidebar-brand">
         <span className="mark">OP</span>
         <div><strong>Open Personal Agent</strong><small>{t("brand.subtitle")}</small></div>
       </div>
@@ -999,7 +1147,7 @@ export function App() {
           <button
             key={item.id}
             className={tab === item.id ? "active" : ""}
-            onClick={() => setTab(item.id)}
+            onClick={() => { navigateTab(item.id); setMobileMenuOpen(false); }}
           >
             {t(item.labelKey)}
           </button>
@@ -1009,7 +1157,8 @@ export function App() {
         <span>{t("language.label")}</span>
         <select
           value={locale}
-          onChange={(event) => setLocale(event.currentTarget.value as Locale)}
+          disabled={busy}
+          onChange={(event) => { void saveOwnerLocale(event.currentTarget.value as Locale); }}
         >
           <option value="ja">{t("language.ja")}</option>
           <option value="en">{t("language.en")}</option>
@@ -1039,10 +1188,6 @@ export function App() {
         <button className="quiet" onClick={() => void load()}>{t("app.refresh")}</button>
       </header>
       {error && <div role="alert" className="error">{error}</div>}
-      {(tab === "conversation" || tab === "tasks" || tab === "memory") &&
-        <p className="context">
-          {t("conversation.context")} <code>{conversationId || t("conversation.notCreated")}</code>
-        </p>}
       {tab === "conversation" &&
         <form onSubmit={(event) => { void submit(event); }} className="composer">
           <textarea
@@ -1253,7 +1398,10 @@ export function App() {
             {t("plugins.update")} {display(plugin["pluginId"])}</button>)}</div></section>}
         <section className="cards">{plugins.length === 0
           ? <div className="empty"><strong>{t("empty.title")}</strong></div>
-          : plugins.map((plugin) => <article key={display(plugin["installationId"])}><div>
+          : plugins.map((plugin) => {
+            const installationId = display(plugin["installationId"]);
+            const tools = rows(record(plugin["manifest"])["tools"]);
+            return <article key={installationId} className="plugin-card"><div>
             <strong>{display(plugin["pluginId"])}</strong>
             <p>v{display(plugin["version"])} · {display(plugin["status"])}</p>
             <small>{t("plugins.capabilities")}: {Array.isArray(plugin["grantedCapabilityIds"])
@@ -1263,11 +1411,30 @@ export function App() {
                 onClick={() => void rollbackPlugin(display(plugin["installationId"]), display(version["versionId"]))}>
                 {t("plugins.rollback")} v{display(version["version"])}</button>)}
           </div><div className="inline-actions">
-            <button disabled={busy} onClick={() => void setPluginEnabled(display(plugin["installationId"]),
+            {plugin["status"] === "active" && tools.length > 0 && <button type="button" disabled={busy}
+              aria-expanded={openPluginTestId === installationId}
+              onClick={() => setOpenPluginTestId((current) => current === installationId ? "" : installationId)}>
+              {t("plugins.runTool")}
+            </button>}
+            <button disabled={busy} onClick={() => void setPluginEnabled(installationId,
               plugin["status"] !== "active")}>{t(plugin["status"] === "active" ? "plugins.disable" : "plugins.enable")}</button>
             <button className="danger" disabled={busy}
-              onClick={() => void removePlugin(display(plugin["installationId"]))}>{t("items.delete")}</button>
-          </div></article>)}</section>
+              onClick={() => void removePlugin(installationId)}>{t("items.delete")}</button>
+          </div>
+          {openPluginTestId === installationId && plugin["status"] === "active" && tools.length > 0 &&
+            <form className="plugin-invoke-form plugin-invoke-expanded"
+              onSubmit={(event) => { void invokePlugin(event, installationId); }}>
+              <label>{t("plugins.tool")}<select name="toolId" required>{tools.map((tool) =>
+                <option key={display(tool["id"])} value={display(tool["id"])}>{display(tool["id"])}</option>)}</select></label>
+              <label>{t("plugins.input")}<textarea name="input" defaultValue="{}" spellCheck={false} required /></label>
+              <button disabled={busy}>{t("plugins.run")}</button>
+              {pluginInvocationResults[installationId] && <div className="plugin-result">
+                <strong>{t("plugins.result")}</strong>
+                <StructuredValue value={pluginInvocationResults[installationId]} />
+              </div>}
+            </form>}
+          </article>;
+          })}</section>
       </>}
       {tab === "tasks" &&
         <>
@@ -1373,7 +1540,7 @@ export function App() {
                     <span>{t("empty.body")}</span>
                   </div>
                 : collection.map((item, index) =>
-                    <article key={display(
+                    <article className={tab === "approvals" ? "approval-card" : undefined} key={display(
                       item["taskId"] ?? item["key"] ?? item["approvalId"] ?? item["connectionId"] ??
                         item["eventId"] ?? item["messageId"],
                       String(index),

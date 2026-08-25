@@ -2,14 +2,15 @@
   "apiVersion": "opap.dev/deployment-target/v1alpha1",
   "id": "staging",
   "deploymentName": "opap-staging",
+  "deploymentId": "deployment:staging",
   "environment": "staging",
-  "profile": "cloud-base",
+  "profile": "cloud-base-dynamic",
   "providers": {
     "aiSearch": true,
     "discord": true,
     "google": true,
     "github": true,
-    "dynamicPlugin": false
+    "dynamicPlugin": true
   },
   "resources": {
     "workers": {

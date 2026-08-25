@@ -1099,12 +1099,13 @@ async function ownerPreferences(request: Request, env: Bindings): Promise<Respon
   const deploymentId = url.searchParams.get("deploymentId");
   if (!deploymentId) return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
   const current = await env.CONTROL_DB.prepare(
-    `SELECT time_zone, last_idempotency_key, last_update_fingerprint, updated_at
+    `SELECT time_zone, locale, last_idempotency_key, last_update_fingerprint, updated_at
      FROM owner_preferences WHERE deployment_id = ?`,
-  ).bind(deploymentId).first<{ time_zone: string; last_idempotency_key: string | null;
+  ).bind(deploymentId).first<{ time_zone: string; locale: "en" | "ja"; last_idempotency_key: string | null;
     last_update_fingerprint: string | null; updated_at: string }>();
   if (request.method === "GET") {
-    return current ? Response.json({ timeZone: current.time_zone, updatedAt: current.updated_at })
+    return current ? Response.json({ timeZone: current.time_zone, locale: current.locale,
+      updatedAt: current.updated_at })
       : Response.json({ code: "OWNER_PREFERENCES_NOT_SET" }, { status: 404 });
   }
   const value: unknown = await request.json().catch(() => null);
@@ -1113,36 +1114,44 @@ async function ownerPreferences(request: Request, env: Bindings): Promise<Respon
   }
   const body = value as Record<string, unknown>;
   const timeZone = normalizeTimeZone(body["timeZone"]);
-  if (!timeZone || typeof body["principalId"] !== "string" ||
-    typeof body["requestId"] !== "string" || typeof body["idempotencyKey"] !== "string") {
+  const locale = body["locale"] === undefined ? current?.locale ?? "ja" : body["locale"];
+  if (!timeZone) {
     return Response.json({ code: "INVALID_TIME_ZONE" }, { status: 400 });
   }
-  const fingerprint = await sha256Hex(timeZone);
+  if (locale !== "en" && locale !== "ja") {
+    return Response.json({ code: "INVALID_LOCALE" }, { status: 400 });
+  }
+  if (typeof body["principalId"] !== "string" || typeof body["requestId"] !== "string" ||
+    typeof body["idempotencyKey"] !== "string") {
+    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  const fingerprint = await sha256Hex(JSON.stringify({ timeZone, locale }));
   if (current?.last_idempotency_key === body["idempotencyKey"]) {
     return current.last_update_fingerprint === fingerprint
-      ? Response.json({ timeZone: current.time_zone, updatedAt: current.updated_at })
+      ? Response.json({ timeZone: current.time_zone, locale: current.locale, updatedAt: current.updated_at })
       : Response.json({ code: "IDEMPOTENCY_CONFLICT" }, { status: 409 });
   }
   const now = new Date().toISOString();
   await env.CONTROL_DB.prepare(
     `INSERT INTO owner_preferences
-     (deployment_id, time_zone, last_idempotency_key, last_update_fingerprint, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+     (deployment_id, time_zone, locale, last_idempotency_key, last_update_fingerprint, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(deployment_id) DO UPDATE SET time_zone = excluded.time_zone,
+       locale = excluded.locale,
        last_idempotency_key = excluded.last_idempotency_key,
        last_update_fingerprint = excluded.last_update_fingerprint,
        updated_at = excluded.updated_at`,
-  ).bind(deploymentId, timeZone, body["idempotencyKey"], fingerprint, now).run();
+  ).bind(deploymentId, timeZone, locale, body["idempotencyKey"], fingerprint, now).run();
   const audited = await audit(env, { deploymentId, principalId: body["principalId"],
-    eventType: "owner.time-zone.changed", outcome: "success", requestId: body["requestId"],
-    metadata: { timeZone },
+    eventType: "owner.preferences.changed", outcome: "success", requestId: body["requestId"],
+    metadata: { timeZone, locale },
   });
   if (!audited) {
     if (current) {
       await env.CONTROL_DB.prepare(
-        `UPDATE owner_preferences SET time_zone = ?, last_idempotency_key = ?,
+        `UPDATE owner_preferences SET time_zone = ?, locale = ?, last_idempotency_key = ?,
          last_update_fingerprint = ?, updated_at = ? WHERE deployment_id = ?`,
-      ).bind(current.time_zone, current.last_idempotency_key, current.last_update_fingerprint,
+      ).bind(current.time_zone, current.locale, current.last_idempotency_key, current.last_update_fingerprint,
         current.updated_at, deploymentId).run();
     } else {
       await env.CONTROL_DB.prepare("DELETE FROM owner_preferences WHERE deployment_id = ?")
@@ -1150,7 +1159,7 @@ async function ownerPreferences(request: Request, env: Bindings): Promise<Respon
     }
     return Response.json({ code: "AUDIT_UNAVAILABLE" }, { status: 503 });
   }
-  return Response.json({ timeZone, updatedAt: now });
+  return Response.json({ timeZone, locale, updatedAt: now });
 }
 
 const isConversationRegistryInput = (value: unknown): value is ConversationRegistryInput => {
@@ -1235,14 +1244,22 @@ async function conversationStorageStatus(request: Request, env: Bindings): Promi
     hardLimitReached: usedBytes >= hardLimitBytes });
 }
 
-const pluginMutationInput = async (request: Request): Promise<Record<string, unknown> | undefined> => {
+const readPluginMutationInput = async (request: Request): Promise<{
+  input?: Record<string, unknown>;
+  missingFields: string[];
+}> => {
   const value: unknown = await request.json().catch(() => null);
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { missingFields: ["requestBody"] };
+  }
   const input = value as Record<string, unknown>;
-  return typeof input["deploymentId"] === "string" && typeof input["principalId"] === "string" &&
-    typeof input["requestId"] === "string" && typeof input["idempotencyKey"] === "string"
-    ? input : undefined;
+  const required = ["deploymentId", "principalId", "requestId", "idempotencyKey"];
+  const missingFields = required.filter((field) => typeof input[field] !== "string");
+  return missingFields.length === 0 ? { input, missingFields } : { missingFields };
 };
+
+const pluginMutationInput = async (request: Request): Promise<Record<string, unknown> | undefined> =>
+  (await readPluginMutationInput(request)).input;
 
 async function listPlugins(request: Request, env: Bindings): Promise<Response> {
   const deploymentId = new URL(request.url).searchParams.get("deploymentId");
@@ -1279,18 +1296,28 @@ async function listPlugins(request: Request, env: Bindings): Promise<Response> {
 }
 
 async function recordPluginInspection(request: Request, env: Bindings): Promise<Response> {
-  const input = await pluginMutationInput(request);
+  const parsed = await readPluginMutationInput(request);
+  const input = parsed.input;
   const inspection = input?.["inspection"];
-  if (!input || typeof inspection !== "object" || inspection === null || Array.isArray(inspection)) {
-    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  if (!input) return Response.json({ code: "PLUGIN_INSPECTION_CONTEXT_INVALID",
+    message: `Missing or invalid fields: ${parsed.missingFields.join(", ")}` }, { status: 400 });
+  if (typeof inspection !== "object" || inspection === null || Array.isArray(inspection)) {
+    return Response.json({ code: "PLUGIN_INSPECTION_INVALID",
+      message: "Inspection result is missing" }, { status: 400 });
   }
   const row = inspection as Record<string, unknown>;
   const manifest = pluginManifestSchema.safeParse(row["manifest"]);
-  if (!manifest.success || typeof row["archiveSha256"] !== "string" ||
-    typeof row["bundleSha256"] !== "string" || typeof row["r2ObjectKey"] !== "string" ||
-    typeof row["expandedBytes"] !== "number" || typeof row["entryCount"] !== "number" ||
-    (row["sbomVersion"] !== "1.5" && row["sbomVersion"] !== "1.6")) {
-    return Response.json({ code: "INVALID_REQUEST" }, { status: 400 });
+  if (!manifest.success) return Response.json({ code: "PLUGIN_MANIFEST_INVALID",
+    message: manifest.error.issues.map((issue) => `${issue.path.join(".") || "manifest"}: ${issue.message}`).join("; "),
+  }, { status: 400 });
+  const invalidField = ["archiveSha256", "bundleSha256", "r2ObjectKey", "expandedBytes", "entryCount"]
+    .find((field) => field.endsWith("Bytes") || field === "entryCount"
+      ? typeof row[field] !== "number" : typeof row[field] !== "string");
+  if (invalidField) return Response.json({ code: "PLUGIN_INSPECTION_INVALID",
+    message: `Invalid or missing ${invalidField}` }, { status: 400 });
+  if (row["sbomVersion"] !== "1.5" && row["sbomVersion"] !== "1.6") {
+    return Response.json({ code: "PLUGIN_SBOM_INVALID",
+      message: "CycloneDX SBOM version must be 1.5 or 1.6" }, { status: 400 });
   }
   const inspectionId = `plugin-inspection:${crypto.randomUUID()}`;
   const now = new Date();
