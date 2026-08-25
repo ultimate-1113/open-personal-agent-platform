@@ -8,3 +8,14 @@ regexTarget = "secret"
 regexes = [
   '''^776cd97855a80999f08692fb0b2f7bdb52f54a170823e681e88530baa815e70f$''',
 ]
+paths = [
+  '''^apps/discord-adapter/src/worker-configuration\.d\.ts$''',
+]
+
+[[allowlists]]
+description = "Non-secret Access audience used only by setup-engine tests"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^audience_1234567890$''',
+]
