@@ -109,7 +109,10 @@ describe("setup engine", () => {
     expect(selectWorkersToDeploy(base)).toEqual(["assistant-worker"]);
     expect(selectWorkersToDeploy({ ...base, existingWorkerNames: new Set(["opap-quota"]) }))
       .toEqual(["assistant-worker"]);
-    expect(selectWorkersToDeploy({ ...base, previousArtifacts: undefined }))
+    const withoutPreviousArtifacts = { action: base.action, workers: base.workers,
+      existingWorkerNames: base.existingWorkerNames, resolvedWorkerNames: base.resolvedWorkerNames,
+      previousStatus: base.previousStatus, currentArtifacts: base.currentArtifacts };
+    expect(selectWorkersToDeploy(withoutPreviousArtifacts))
       .toEqual(["quota-worker", "assistant-worker"]);
     expect(selectWorkersToDeploy({ ...base, action: "repair" }))
       .toEqual(["quota-worker", "assistant-worker"]);
