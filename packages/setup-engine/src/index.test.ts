@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { additionalSecretNamesForExistingWorker, assertAllowedUrl, collectSelectedServiceNames, createInstallPlan,
   isAlreadyAbsentCloudflareError, orderWorkersForDeployment,
-  namespaceWorkerName, sanitizeLogFields, shouldBackupD1,
+  namespaceWorkerName, sanitizeLogFields, selectWorkersToDeploy, shouldBackupD1,
   transformWranglerConfig, validateDeploymentName, validateOwnerBootstrapConfiguration,
   validateDeploymentTarget, type SetupRequest } from "./index";
 import { validateEnvironment } from "./index";
@@ -99,6 +99,20 @@ describe("setup engine", () => {
   it("creates a reviewable dry-run plan", () => {
     expect(createInstallPlan(request, ["quota-worker", "assistant-worker"]).map((event) => event.stage))
       .toContain("deploy:assistant-worker");
+  });
+  it("updates only changed or missing Workers after an active installation", () => {
+    const base = { action: "update" as const, workers: ["quota-worker", "assistant-worker"],
+      existingWorkerNames: new Set(["opap-quota", "opap-assistant"]),
+      resolvedWorkerNames: { "quota-worker": "opap-quota", "assistant-worker": "opap-assistant" },
+      previousStatus: "active" as const, previousArtifacts: { "quota-worker": "same", "assistant-worker": "old" },
+      currentArtifacts: { "quota-worker": "same", "assistant-worker": "new" } };
+    expect(selectWorkersToDeploy(base)).toEqual(["assistant-worker"]);
+    expect(selectWorkersToDeploy({ ...base, existingWorkerNames: new Set(["opap-quota"]) }))
+      .toEqual(["assistant-worker"]);
+    expect(selectWorkersToDeploy({ ...base, previousArtifacts: undefined }))
+      .toEqual(["quota-worker", "assistant-worker"]);
+    expect(selectWorkersToDeploy({ ...base, action: "repair" }))
+      .toEqual(["quota-worker", "assistant-worker"]);
   });
   it("enforces the Worker name limit", () => {
     expect(() => namespaceWorkerName("opap-assistant", "a".repeat(24))).not.toThrow();

@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,6 +8,7 @@ import { loadEnvFile, stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
 import { additionalSecretNamesForExistingWorker, collectSelectedServiceNames, isAlreadyAbsentCloudflareError,
   orderWorkersForDeployment, shouldBackupD1,
+  selectWorkersToDeploy,
   transformWranglerConfig, validateDeploymentName, type SetupRequest,
   validateOwnerBootstrapConfiguration, type InstallationLedger, type ManagedResource,
   validateDeploymentTarget, type WranglerConfig
@@ -193,12 +195,32 @@ if (!action) {
   commands.push(["corepack", ["pnpm@11.23.0", "exec", "wrangler", "whoami"]]);
   if (workers.includes("plugin-runtime-worker") && args.has("--apply") &&
     action !== "remove" && action !== "doctor") {
-    try {
-      const dockerVersion = capture("docker", ["info", "--format", "{{.ServerVersion}}"]);
-      console.log(`Docker Engine ${dockerVersion.trim()}: ready`);
-    } catch {
-      throw new Error("Preflight failed: Docker Desktop or Docker Engine must be running before Cloud Base Dynamic can be deployed");
+    const dockerVersion = (): string | undefined => {
+      try { return capture("docker", ["info", "--format", "{{.ServerVersion}}"]).trim(); }
+      catch { return undefined; }
+    };
+    let version = dockerVersion();
+    if (!version) {
+      const launch = process.platform === "win32"
+        ? { command: "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe", arguments: [] as string[] }
+        : process.platform === "darwin"
+          ? { command: "open", arguments: ["-a", "Docker"] }
+          : undefined;
+      const launchAvailable = launch && (process.platform === "darwin"
+        || await access(launch.command).then(() => true).catch(() => false));
+      if (launch && launchAvailable) {
+        console.log("Docker is installed but stopped. Starting Docker Desktop...");
+        const child = spawn(launch.command, launch.arguments,
+          { detached: true, stdio: "ignore", windowsHide: true });
+        child.unref();
+        for (let attempt = 0; attempt < 60 && !version; attempt += 1) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
+          version = dockerVersion();
+        }
+      }
     }
+    if (!version) throw new Error("Preflight failed: install and start Docker Desktop or Docker Engine before Cloud Base Dynamic is deployed");
+    console.log(`Docker Engine ${version}: ready`);
   }
   for (const [command, commandArgs] of commands) {
     const result = run(command, commandArgs);
@@ -563,6 +585,7 @@ if (!action) {
     const previousResources = new Map<string, ManagedResource>((previousLedger?.resources ?? [])
       .map((resource) => [`${resource.kind}:${resource.name}`, resource]));
     let containerResources = [...previousResources.values()].filter((resource) => resource.kind === "container");
+    let currentWorkerArtifacts: Record<string, string> = {};
     const writeLedger = async (status: "installing" | "active" | "failed"): Promise<void> => {
       await mkdir(dirname(ledgerPath), { recursive: true });
       await writeFile(ledgerPath, `${JSON.stringify({ apiVersion: "opap.dev/installation-ledger/v1alpha1",
@@ -585,7 +608,8 @@ if (!action) {
           secretId: `${target.worker}:${target.name}`, purpose: `${target.worker} ${target.name}`,
           storage: "cloudflare-only", recoverable: true })), completedOperations: status === "active"
           ? [...new Set([...(previousLedger?.completedOperations ?? []), action, "smoke"])]
-          : previousLedger?.completedOperations ?? [],
+          : previousLedger?.completedOperations ?? [], artifacts: status === "active"
+            ? { workers: currentWorkerArtifacts } : previousLedger?.artifacts,
       }, null, 2)}\n`, "utf8");
     };
     await writeLedger("installing");
@@ -601,6 +625,23 @@ if (!action) {
         `${JSON.stringify(config, null, 2)}\n`, "utf8");
     }
     console.log(`Resolved resource bindings were written to ignored ${generatedConfigName} files.`);
+    currentWorkerArtifacts = Object.fromEntries(await Promise.all(workers.map(async (worker) => {
+      const digest = createHash("sha256");
+      digest.update(await readFile(new URL(`../apps/${worker}/dist/index.js`, import.meta.url)));
+      digest.update("\0");
+      digest.update(await readFile(new URL(`../apps/${worker}/${generatedConfigName}`, import.meta.url)));
+      if (worker === "plugin-runtime-worker") {
+        digest.update("\0");
+        digest.update(await readFile(new URL(`../apps/${worker}/Dockerfile`, import.meta.url)));
+      }
+      return [worker, digest.digest("hex")] as const;
+    })));
+    const workersToDeploy = selectWorkersToDeploy({ action, workers, existingWorkerNames: existingWorkers,
+      resolvedWorkerNames: Object.fromEntries([...configs].map(([worker, config]) => [worker, config.name])),
+      ...(previousLedger?.status ? { previousStatus: previousLedger.status } : {}),
+      ...(previousLedger?.artifacts?.workers ? { previousArtifacts: previousLedger.artifacts.workers } : {}),
+      currentArtifacts: currentWorkerArtifacts });
+    console.log(`Deployment changes: ${workersToDeploy.length > 0 ? workersToDeploy.join(",") : "(none)"}`);
 
     const backupStamp = new Date().toISOString().replaceAll(":", "-");
     const backupDirectory = process.env["OPAP_BACKUP_DIRECTORY"]
@@ -656,7 +697,7 @@ if (!action) {
         conversationBootstrap = true;
       }
     }
-    for (const worker of workers) {
+    for (const worker of workersToDeploy) {
       if (conversationBootstrap && worker === "conversation-agent") continue;
       console.log(`\nDeploying ${worker}`);
       await deploy(worker, generatedConfigName);

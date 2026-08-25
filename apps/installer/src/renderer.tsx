@@ -9,6 +9,7 @@ type Configuration = { targetId: "test" | "staging" | "production"; deploymentNa
   profile: "cloud-base" | "cloud-base-dynamic"; productName: string; defaultDataPath: string;
   providers: { google: boolean; github: boolean; discord: boolean } };
 type Provider = "google" | "github" | "discord";
+type PlanItem = { stage: string; progress: number };
 
 const text = {
   ja: {
@@ -76,6 +77,7 @@ function App() {
   const [locale, setLocale] = useState<"ja" | "en">("ja");
   const t = text[locale];
   const [overview, setOverview] = useState<Overview>();
+  const [plan, setPlan] = useState<PlanItem[]>([]);
   const [config, setConfig] = useState<Configuration>();
   const [step, setStep] = useState(0);
   const [tab, setTab] = useState<"setup" | "audit">("setup");
@@ -96,8 +98,10 @@ function App() {
   const [exportConfirmed, setExportConfirmed] = useState(false);
   const [maintenanceResult, setMaintenanceResult] = useState<string>();
   const [adoptedExisting, setAdoptedExisting] = useState(false);
-  const [installProgress, setInstallProgress] = useState<{ stage: string; progress: number; message: string }>();
+  const [installProgress, setInstallProgress] = useState<{ stage: string; progress: number; message: string;
+    plan?: PlanItem[] }>();
   const [installStartedAt, setInstallStartedAt] = useState<number>();
+  const [activeOperation, setActiveOperation] = useState<"install" | "update" | "repair" | "remove">();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const initializeVault = async (deploymentName: string) => {
@@ -107,10 +111,18 @@ function App() {
     } catch (error) { setVaultStatus(error instanceof Error ? error.message : "failed"); }
   };
   useEffect(() => { void Promise.all([window.opapInstaller.getOverview(), window.opapInstaller.getConfiguration()]).then(([a, b]) => {
-    const next = b as Configuration; setOverview(a as Overview); setConfig(next); setDataPath(next.defaultDataPath); document.title = next.productName;
+    const nextOverview = a as Overview; const next = b as Configuration; setOverview(nextOverview); setPlan(nextOverview.plan); setConfig(next); setDataPath(next.defaultDataPath); document.title = next.productName;
     setProviders(next.providers);
   }).catch((error: unknown) => setStartupError(error instanceof Error ? error.message : "Startup failed")); }, []);
-  useEffect(() => { window.opapInstaller.onInstallProgress((value) => setInstallProgress(value)); }, []);
+  useEffect(() => { window.opapInstaller.onInstallProgress((value) => {
+    if (value.plan) setPlan(value.plan);
+    setInstallProgress((current) => current && value.progress < current.progress
+      ? { ...value, progress: current.progress } : value);
+  }); }, []);
+  useEffect(() => {
+    if (!config) return;
+    void window.opapInstaller.getPlan(providers).then((value) => setPlan(value as PlanItem[]));
+  }, [config, providers]);
   useEffect(() => {
     if (!installStartedAt) return;
     const timer = window.setInterval(() => setElapsedSeconds(Math.floor((Date.now() - installStartedAt) / 1000)), 1000);
@@ -140,17 +152,19 @@ function App() {
     }).catch((error: unknown) => { setCloudflare("failed"); setAuthError(error instanceof Error ? error.message : "CLOUDFLARE_AUTH_FAILED"); });
   };
   const install = (action: "install" | "update" | "repair") => {
+    if (activeOperation) return;
+    setActiveOperation(action);
     setResult(`${action}…`); setInstallProgress({ stage: "preflight", progress: 0, message: "Starting setup" });
     setElapsedSeconds(0); setInstallStartedAt(Date.now());
     void window.opapInstaller.install({ deploymentName: config.deploymentName, profile: config.profile, localDataPath: dataPath,
       ...providers, ...owner, action }).then((value) => { const next = value as { status: string; errorCode?: string; detail?: string };
       setResult(next.detail ? `${next.status}: ${next.detail}` : next.errorCode ? `${next.status}: ${next.errorCode}` : next.status);
       if (next.status === "active") setInstallProgress({ stage: "complete", progress: 100, message: "Completed" });
-      setInstallStartedAt(undefined);
-    });
+    }).catch((error: unknown) => setResult(`failed: ${error instanceof Error ? error.message : "SETUP_FAILED"}`))
+      .finally(() => { setInstallStartedAt(undefined); setActiveOperation(undefined); });
   };
   const canNext = [cloudflare === "ready", Boolean(dataPath), Boolean(owner.ownerEmail), Boolean(owner.accessTeamDomain && owner.accessAudience), true][step];
-  const canInstall = cloudflare === "ready" && vaultReady && dataPath && owner.ownerEmail && owner.accessTeamDomain && owner.accessAudience;
+  const canInstall = !activeOperation && cloudflare === "ready" && vaultReady && dataPath && owner.ownerEmail && owner.accessTeamDomain && owner.accessAudience;
   const diagnostic = (value: string) => <div className="diagnostic"><pre>{value}</pre><div className="diagnostic-actions">
     <button onClick={() => void window.opapInstaller.copyDiagnostic(value)}>{t.copyError}</button>
     <button onClick={() => void window.opapInstaller.saveDiagnostic(value)}>{t.saveError}</button>
@@ -183,18 +197,18 @@ function App() {
         <code>{providerStatus[provider] ?? t.notImported}</code><button onClick={() => { void window.opapInstaller.importProvider({ deploymentName: config.deploymentName, provider }).then((value) => { const next = value as { status: string; label?: string };
           setProviderStatus((current) => ({ ...current, [provider]: next.label ?? next.status })); if (next.status === "ready") setProviders((current) => ({ ...current, [provider]: true })); }); }}>{t.importJson}</button>
         {provider === "github" && <div className="provider-extra"><label>{t.githubCallback}<input value={githubCallbackUrl} onChange={(event) => setGithubCallbackUrl(event.target.value)}/></label><button disabled={!githubCallbackUrl} onClick={() => { void window.opapInstaller.createGitHubApp({ deploymentName: config.deploymentName, oauthCallbackUrl: githubCallbackUrl }); }}>{t.createGithub}</button></div>}</div>)}</details>
-      <details><summary>{t.planned}</summary><ol>{overview.plan.map((item) => <li key={item.stage}><span>{item.stage}</span><small>{item.progress}%</small></li>)}</ol></details>
+      <details><summary>{t.planned}</summary><ol>{plan.map((item) => <li key={item.stage}><span>{item.stage}</span><small>{item.progress}%</small></li>)}</ol></details>
       {installProgress && <section className="install-progress" aria-live="polite"><div><strong>{t.progress}: {installProgress.progress}%</strong>
         <span>{installProgress.message}</span><small>{t.elapsed}: {elapsedSeconds}s</small></div>
         <progress max="100" value={installProgress.progress}>{installProgress.progress}%</progress></section>}
       <div className="final-actions">{result?.startsWith("failed:")
         ? <div className="final-result">{diagnostic(result)}</div>
         : <code>{result ?? (canInstall ? t.notStarted : t.missing)}</code>}
-        <button onClick={() => void window.opapInstaller.saveDryRun(overview)}>{t.dryRun}</button><button disabled={!canInstall} onClick={() => install("repair")}>{t.repair}</button><button className="primary" disabled={!canInstall} onClick={() => install(adoptedExisting ? "update" : "install")}>{adoptedExisting ? t.update : t.create}</button></div></section>,
+        <button disabled={Boolean(activeOperation)} onClick={() => void window.opapInstaller.saveDryRun(overview)}>{t.dryRun}</button><button disabled={!canInstall} onClick={() => install("repair")}>{t.repair}</button><button className="primary" disabled={!canInstall} onClick={() => install(adoptedExisting ? "update" : "install")}>{adoptedExisting ? t.update : t.create}</button></div></section>,
   ];
 
   return <main><header><div><span className="eyebrow">OPEN PERSONAL AGENT</span><h1>{t.title}</h1></div><div className="tabs">
-    <button onClick={() => setLocale(locale === "ja" ? "en" : "ja")}>{t.language}</button>
+    <button onClick={() => setLocale(locale === "ja" ? "en" : "ja")}>{locale === "ja" ? "English" : "日本語"}</button>
     <button className={tab === "setup" ? "active" : ""} onClick={() => setTab("setup")}>{t.install}</button><button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}>{t.audit}</button></div></header>
     {overview.unsigned && <section className="warning"><strong>{t.unsigned}</strong><span>{t.unsignedHelp}</span></section>}
     {tab === "setup" ? <section className="card wizard">{setupPages[step]}<nav className="wizard-nav"><button disabled={step === 0} onClick={() => setStep((value) => value - 1)}>{t.back}</button>
@@ -203,10 +217,11 @@ function App() {
       <section className="card"><h2>{t.network}</h2><div className="chips">{overview.networkHosts.map((host) => <code key={host}>{host}</code>)}</div></section>
       <section className="card"><h2>{t.generated}</h2><ul>{Object.entries(overview.secretPurposes).map(([name, purpose]) => <li key={name}><code>{name}</code><span>{purpose}</span></li>)}</ul></section>
       <section className="card danger"><h2>{t.maintenance}</h2><h3>{t.remove}</h3><p>{t.removeHelp}</p><label className="provider"><input type="checkbox" checked={exportConfirmed} onChange={(event) => setExportConfirmed(event.target.checked)}/><span>{t.exportVerified}</span></label>
-        <button disabled={!exportConfirmed} onClick={() => { void window.opapInstaller.remove({ deploymentName: config.deploymentName, localDataPath: dataPath, exportConfirmed }).then((value) => {
-          const next = value as { status: string; errorCode?: string; detail?: string };
-          setMaintenanceResult(next.detail ? `${next.status}: ${next.detail}` : next.errorCode ? `${next.status}: ${next.errorCode}` : next.status);
-        }); }}>{t.remove}</button>{maintenanceResult && (maintenanceResult.startsWith("failed:") ? diagnostic(maintenanceResult) : <p><code>{maintenanceResult}</code></p>)}</section>
+        <button disabled={!exportConfirmed || Boolean(activeOperation)} onClick={() => { if (activeOperation) return; setActiveOperation("remove"); void window.opapInstaller.remove({ deploymentName: config.deploymentName, localDataPath: dataPath, exportConfirmed }).then((value) => {
+           const next = value as { status: string; errorCode?: string; detail?: string };
+           setMaintenanceResult(next.detail ? `${next.status}: ${next.detail}` : next.errorCode ? `${next.status}: ${next.errorCode}` : next.status);
+        }).catch((error: unknown) => setMaintenanceResult(`failed: ${error instanceof Error ? error.message : "REMOVAL_FAILED"}`))
+          .finally(() => setActiveOperation(undefined)); }}>{t.remove}</button>{maintenanceResult && (maintenanceResult.startsWith("failed:") ? diagnostic(maintenanceResult) : <p><code>{maintenanceResult}</code></p>)}</section>
     </>}
   </main>;
 }

@@ -87,6 +87,7 @@ export type InstallationLedger = {
   resources: ManagedResource[];
   secrets: SecretReference[];
   completedOperations: string[];
+  artifacts?: { workers: Record<string, string> };
 };
 
 export type WranglerConfig = {
@@ -317,6 +318,25 @@ export function createInstallPlan(request: SetupRequest, workers: readonly strin
     progress: Math.round((index / stages.length) * 100),
     recoverable: true,
   }));
+}
+
+export function selectWorkersToDeploy(input: {
+  action: "setup" | "update" | "repair";
+  workers: readonly string[];
+  existingWorkerNames: ReadonlySet<string>;
+  resolvedWorkerNames: Readonly<Record<string, string | undefined>>;
+  previousStatus?: InstallationLedger["status"];
+  previousArtifacts?: Readonly<Record<string, string>>;
+  currentArtifacts: Readonly<Record<string, string>>;
+}): string[] {
+  if (input.action !== "update" || input.previousStatus !== "active" || !input.previousArtifacts) {
+    return [...input.workers];
+  }
+  return input.workers.filter((worker) => {
+    const resolvedName = input.resolvedWorkerNames[worker];
+    return !resolvedName || !input.existingWorkerNames.has(resolvedName)
+      || input.previousArtifacts?.[worker] !== input.currentArtifacts[worker];
+  });
 }
 
 export function sanitizeLogFields(fields: Record<string, unknown>): Record<string, string | number | boolean | null> {

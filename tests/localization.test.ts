@@ -71,7 +71,7 @@ describe("localization contract", () => {
     expect(app).toContain('request("/v1/settings/preferences"');
     expect(app).toContain('JSON.stringify({ locale: nextLocale })');
     expect(installer).toContain('useState<"ja" | "en">("ja")');
-    expect(installer).toContain(">{t.language}</button>");
+    expect(installer).toContain('{locale === "ja" ? "English" : "日本語"}</button>');
   });
 
   it("persists the selected workspace tab and follows browser history", () => {

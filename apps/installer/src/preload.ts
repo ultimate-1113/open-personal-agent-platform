@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 export type InstallerBridge = {
   getOverview: () => Promise<unknown>;
+  getPlan: (input: { google: boolean; github: boolean; discord: boolean }) => Promise<unknown>;
   getConfiguration: () => Promise<unknown>;
   selectDataPath: (currentPath: string) => Promise<string | null>;
   initializeVault: (input: { deploymentName: string; passphrase?: string }) => Promise<unknown>;
@@ -16,7 +17,8 @@ export type InstallerBridge = {
     localDataPath: string;
     ownerEmail: string; accessTeamDomain: string; accessAudience: string; ownerTimeZone: string;
     aiGatewayId: string; action?: "install" | "update" | "repair" }) => Promise<unknown>;
-  onInstallProgress: (callback: (value: { stage: string; progress: number; message: string }) => void) => void;
+  onInstallProgress: (callback: (value: { stage: string; progress: number; message: string;
+    plan?: Array<{ stage: string; progress: number }> }) => void) => void;
   authenticateCloudflare: () => Promise<unknown>;
   importProvider: (input: { deploymentName: string; provider: "google" | "github" | "discord" }) => Promise<unknown>;
   createGitHubApp: (input: { deploymentName: string; oauthCallbackUrl: string }) => Promise<unknown>;
@@ -25,6 +27,7 @@ export type InstallerBridge = {
 
 const bridge: InstallerBridge = {
   getOverview: () => ipcRenderer.invoke("installer:get-overview") as Promise<unknown>,
+  getPlan: (input) => ipcRenderer.invoke("installer:get-plan", input) as Promise<unknown>,
   getConfiguration: () => ipcRenderer.invoke("installer:get-configuration") as Promise<unknown>,
   selectDataPath: (currentPath) => ipcRenderer.invoke("installer:select-data-path", currentPath) as Promise<string | null>,
   initializeVault: (input) => ipcRenderer.invoke("installer:initialize-vault", input) as Promise<unknown>,
@@ -36,7 +39,8 @@ const bridge: InstallerBridge = {
   saveSbom: () => ipcRenderer.invoke("installer:save-sbom") as Promise<boolean>,
   install: (input) => ipcRenderer.invoke("installer:install", input) as Promise<unknown>,
   onInstallProgress: (callback) => { ipcRenderer.on("installer:install-progress", (_event, value: unknown) => {
-    callback(value as { stage: string; progress: number; message: string });
+    callback(value as { stage: string; progress: number; message: string;
+      plan?: Array<{ stage: string; progress: number }> });
   }); },
   authenticateCloudflare: () => ipcRenderer.invoke("installer:authenticate-cloudflare") as Promise<unknown>,
   importProvider: (input) => ipcRenderer.invoke("installer:import-provider", input) as Promise<unknown>,

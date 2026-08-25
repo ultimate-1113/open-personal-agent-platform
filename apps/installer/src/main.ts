@@ -57,14 +57,36 @@ const nodeModuleArguments = (entry: string, args: readonly string[]): string[] =
 const wranglerEnvironment = (): NodeJS.ProcessEnv => ({ ...process.env, ELECTRON_RUN_AS_NODE: "1",
   XDG_CONFIG_HOME: join(app.getPath("userData"), "wrangler-auth") });
 const installerWorkers = ["quota-worker", "audit-ledger-worker", "policy-control-worker",
-  "conversation-agent", "maintenance-worker", "assistant-worker", "public-agent-api",
-  "delegated-agent-api"] as const;
+  "conversation-agent", "maintenance-worker", "google-gatekeeper", "github-gatekeeper",
+  "discord-gatekeeper", "plugin-runtime-worker", "assistant-worker", "public-agent-api",
+  "delegated-agent-api", "delegated-source-gatekeeper", "discord-adapter"] as const;
+type ProviderFlags = { google: boolean; github: boolean; discord: boolean };
+const selectedInstallerWorkers = (providers: ProviderFlags = installerTarget.providers): string[] => installerWorkers.filter((worker) => {
+  if (!providers.google && worker === "google-gatekeeper") return false;
+  if (!providers.github && worker === "github-gatekeeper") return false;
+  if (!providers.discord && ["discord-gatekeeper", "discord-adapter"].includes(worker)) return false;
+  if (!providers.google && !providers.github
+    && worker === "delegated-source-gatekeeper") return false;
+  if (!installerTarget.providers.dynamicPlugin && worker === "plugin-runtime-worker") return false;
+  return true;
+});
 
-type InstallProgress = { stage: string; progress: number; message: string };
-const progressFromOutput = (line: string): InstallProgress | undefined => {
+type InstallPlanItem = { stage: string; progress: number };
+type InstallProgress = { stage: string; progress: number; message: string; plan?: InstallPlanItem[] };
+type MutatingOperation = "install" | "update" | "repair" | "remove";
+let activeOperation: MutatingOperation | undefined;
+const withOperationLock = async <T>(operation: MutatingOperation, task: () => Promise<T>): Promise<T | {
+  status: "busy"; errorCode: "OPERATION_IN_PROGRESS"; activeOperation: MutatingOperation;
+}> => {
+  if (activeOperation) return { status: "busy", errorCode: "OPERATION_IN_PROGRESS", activeOperation };
+  activeOperation = operation;
+  try { return await task(); }
+  finally { activeOperation = undefined; }
+};
+const progressFromOutput = (line: string, workers: readonly string[]): InstallProgress | undefined => {
   const plan = createInstallPlan({ action: "install", deploymentName: installerTarget.deploymentName,
     profile: installerTarget.profile, accountId: "not-selected", environment: installerTarget.environment,
-    providerSelections: [], dryRun: true }, installerWorkers);
+    providerSelections: [], dryRun: true }, workers);
   const percent = (stage: string) => plan.find((item) => item.stage === stage)?.progress ?? 0;
   const deployed = /^Deploying ([a-z0-9-]+)$/u.exec(line.trim());
   if (deployed?.[1]) return { stage: `deploy:${deployed[1]}`, progress: percent(`deploy:${deployed[1]}`),
@@ -77,7 +99,7 @@ const progressFromOutput = (line: string): InstallProgress | undefined => {
   if (/^Bootstrapping Conversation Agent/u.test(line.trim())) return { stage: "deploy:conversation-agent",
     progress: percent("deploy:conversation-agent"), message: line.trim() };
   if (/^Restoring the Conversation Agent/u.test(line.trim())) return { stage: "deploy:conversation-agent",
-    progress: 90, message: line.trim() };
+    progress: Math.max(percent("deploy:conversation-agent"), percent("smoke") - 1), message: line.trim() };
   if (/smoke checks finished/u.test(line)) return { stage: "smoke", progress: 100, message: line.trim() };
   if (/^Target environment:/u.test(line.trim())) return { stage: "preflight", progress: percent("preflight"),
     message: "Preflight completed" };
@@ -85,21 +107,36 @@ const progressFromOutput = (line: string): InstallProgress | undefined => {
 };
 
 const runSetupProcess = async (input: { arguments: string[]; cwd: string; environment: NodeJS.ProcessEnv;
-  onProgress: (progress: InstallProgress) => void }): Promise<void> => await new Promise((resolve, reject) => {
+  workers: readonly string[]; onProgress: (progress: InstallProgress) => void }): Promise<void> => await new Promise((resolve, reject) => {
   const child = spawn(nodeRuntime, input.arguments, { cwd: input.cwd, windowsHide: true, env: input.environment,
     stdio: ["ignore", "pipe", "pipe"] });
   let stdout = ""; let stderr = ""; let pending = "";
+  let progressWorkers = [...input.workers];
+  const reportLine = (line: string): void => {
+    const changes = /^Deployment changes: (.+)$/u.exec(line.trim());
+    if (changes?.[1]) {
+      progressWorkers = changes[1] === "(none)" ? [] : changes[1].split(",").filter(Boolean);
+      const rawPlan = createInstallPlan({ action: "update", deploymentName: installerTarget.deploymentName,
+        profile: installerTarget.profile, accountId: "not-selected", environment: installerTarget.environment,
+        providerSelections: [], dryRun: true }, progressWorkers);
+      const plan = rawPlan.map((item) => ({ stage: item.stage, progress: item.progress ?? 0 }));
+      input.onProgress({ stage: "resources", progress: plan.find((item) => item.stage === "resources")?.progress ?? 0,
+        message: line.trim(), plan });
+      return;
+    }
+    const progress = progressFromOutput(line, progressWorkers); if (progress) input.onProgress(progress);
+  };
   const retain = (current: string, next: string) => `${current}${next}`.slice(-1024 * 1024);
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     stdout = retain(stdout, chunk); pending += chunk;
     const lines = pending.split(/\r?\n/u); pending = lines.pop() ?? "";
-    for (const line of lines) { const progress = progressFromOutput(line); if (progress) input.onProgress(progress); }
+    for (const line of lines) reportLine(line);
   });
   child.stderr.on("data", (chunk: string) => { stderr = retain(stderr, chunk); });
   child.once("error", reject);
   child.once("close", (code) => {
-    const finalProgress = progressFromOutput(pending); if (finalProgress) input.onProgress(finalProgress);
+    reportLine(pending);
     if (code === 0) { resolve(); return; }
     reject(Object.assign(new Error(`Setup process exited with code ${String(code)}`), { code, stdout, stderr }));
   });
@@ -308,8 +345,21 @@ ipcMain.handle("installer:get-overview", () => {
       : release.sourceUrl ?? `https://github.com/ultimate-1113/open-personal-agent-platform/tree/${release.commit}`,
     networkHosts: [...allowedNetworkHosts].sort(),
     secretPurposes,
-    plan: createInstallPlan(request, installerWorkers),
+    plan: createInstallPlan(request, selectedInstallerWorkers()),
   };
+});
+
+ipcMain.handle("installer:get-plan", (_event, input: unknown) => {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) throw new Error("Invalid provider selection");
+  const value = input as Record<string, unknown>;
+  if (["google", "github", "discord"].some((key) => typeof value[key] !== "boolean")) {
+    throw new Error("Invalid provider selection");
+  }
+  const request: SetupRequest = { action: "install", deploymentName: installerTarget.deploymentName,
+    profile: installerTarget.profile, accountId: "not-selected", environment: installerTarget.environment,
+    providerSelections: [], dryRun: true };
+  return createInstallPlan(request, selectedInstallerWorkers({ google: value["google"] as boolean,
+    github: value["github"] as boolean, discord: value["discord"] as boolean }));
 });
 
 ipcMain.handle("installer:get-configuration", installerConfiguration);
@@ -501,18 +551,23 @@ ipcMain.handle("installer:install", async (event, input: unknown) => {
   if (typeof value.localDataPath !== "string" || !isAbsolute(value.localDataPath)) throw new Error("A local data folder is required");
   validateDeploymentName(value.deploymentName);
   if (value.deploymentName !== installerTarget.deploymentName) throw new Error("Deployment target name cannot be overridden");
+  const deploymentName = value.deploymentName;
+  const localDataPath = value.localDataPath;
   if (value.profile !== "cloud-base" && value.profile !== "cloud-base-dynamic") throw new Error("Invalid setup profile");
   if (value.profile !== installerTarget.profile) throw new Error("Deployment target profile cannot be overridden");
   const requestedAction = value.action === "update" || value.action === "repair" ? value.action : "setup";
   const setupAction = installerTarget.id === "staging" && requestedAction === "setup"
     ? "update" : requestedAction;
+  return withOperationLock(setupAction === "setup" ? "install" : setupAction, async () => {
+  const operationWorkers = selectedInstallerWorkers({ google: value.google === true,
+    github: value.github === true, discord: value.discord === true });
   if (typeof value.ownerEmail !== "string" || typeof value.accessTeamDomain !== "string"
     || typeof value.accessAudience !== "string" || typeof value.ownerTimeZone !== "string"
     || typeof value.aiGatewayId !== "string") throw new Error("Owner bootstrap configuration is incomplete");
   const owner = validateOwnerBootstrapConfiguration({ ownerEmail: value.ownerEmail,
     accessTeamDomain: value.accessTeamDomain, accessAudience: value.accessAudience,
     ownerTimeZone: value.ownerTimeZone, aiGatewayId: value.aiGatewayId });
-  const secrets = vaultSecrets.get(value.deploymentName);
+  const secrets = vaultSecrets.get(deploymentName);
   if (!secrets) throw new Error("Initialize the secret vault before installation");
   if (installerTarget.id !== "staging" && value.google === true
     && (!secrets["GOOGLE_CLIENT_ID"] || !secrets["GOOGLE_CLIENT_SECRET"])) {
@@ -533,9 +588,9 @@ ipcMain.handle("installer:install", async (event, input: unknown) => {
   const working = await mkdtemp(join(tmpdir(), "opap-installer-"));
   const bundle = join(working, "bundle");
   const secretFile = join(working, "values.json");
-  const ledgerDirectory = join(value.localDataPath, "installations");
+  const ledgerDirectory = join(localDataPath, "installations");
   await mkdir(ledgerDirectory, { recursive: true });
-  const ledger = join(ledgerDirectory, `${value.deploymentName}.json`);
+  const ledger = join(ledgerDirectory, `${deploymentName}.json`);
   try {
     await extractDeploymentBundle(archive, bundle);
     await writeFile(secretFile, `${JSON.stringify(secrets)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -545,12 +600,13 @@ ipcMain.handle("installer:install", async (event, input: unknown) => {
       message: "Starting setup" } satisfies InstallProgress);
     await runSetupProcess({ arguments: ["--experimental-strip-types", "--no-warnings",
       ...nodeModuleArguments(runner, [setupAction, "--target", installerTarget.id, "--apply"])], cwd: bundle,
+      workers: operationWorkers,
       onProgress: (progress) => event.sender.send("installer:install-progress", progress),
       environment: { ...wranglerEnvironment(),
         NODE_OPTIONS: [process.env["NODE_OPTIONS"], "--experimental-strip-types", "--no-warnings"].filter(Boolean).join(" "), OPAP_BUNDLE_ROOT: bundle,
         OPAP_WRANGLER_CLI: wranglerRuntime, OPAP_PLATFORM_SECRETS_FILE: secretFile,
         OPAP_INSTALLATION_LEDGER_PATH: ledger,
-        OPAP_BACKUP_DIRECTORY: join(value.localDataPath, "backups"),
+        OPAP_BACKUP_DIRECTORY: join(localDataPath, "backups"),
         OWNER_EMAIL: owner.ownerEmail, OPAP_ACCESS_TEAM_DOMAIN: owner.accessTeamDomain,
         ACCESS_ISSUER: owner.accessIssuer, ACCESS_AUDIENCE: owner.accessAudience,
         ACCESS_JWKS_URI: owner.accessJwksUri, OWNER_TIME_ZONE: owner.ownerTimeZone,
@@ -571,6 +627,7 @@ ipcMain.handle("installer:install", async (event, input: unknown) => {
   } finally {
     await rm(working, { recursive: true, force: true });
   }
+  });
 });
 
 ipcMain.handle("installer:remove", async (_event, input: unknown) => {
@@ -582,22 +639,26 @@ ipcMain.handle("installer:remove", async (_event, input: unknown) => {
   }
   validateDeploymentName(value.deploymentName);
   if (value.deploymentName !== installerTarget.deploymentName) throw new Error("Deployment target name cannot be overridden");
+  const deploymentName = value.deploymentName;
+  const localDataPath = value.localDataPath;
+  return withOperationLock("remove", async () => {
   const working = await mkdtemp(join(tmpdir(), "opap-removal-"));
   const bundle = join(working, "bundle");
   try {
     await extractDeploymentBundle(join(app.getAppPath(), "resources", "opap-deployment-bundle.tgz"), bundle);
-    const ledger = join(value.localDataPath, "installations", `${value.deploymentName}.json`);
+    const ledger = join(localDataPath, "installations", `${deploymentName}.json`);
     await execFileAsync(nodeRuntime, ["--experimental-strip-types", join(bundle, "scripts", "opap-setup.ts"),
       "remove", "--target", installerTarget.id, "--apply", "--confirm",
-      value.deploymentName, "--export-confirmed"], { cwd: bundle, windowsHide: true, maxBuffer: 1024 * 1024,
+      deploymentName, "--export-confirmed"], { cwd: bundle, windowsHide: true, maxBuffer: 1024 * 1024,
       env: { ...wranglerEnvironment(), OPAP_BUNDLE_ROOT: bundle,
         OPAP_WRANGLER_CLI: wranglerRuntime, OPAP_INSTALLATION_LEDGER_PATH: ledger } });
-    await rm(join(app.getPath("userData"), "credentials", `${value.deploymentName}.opap-secrets`), { force: true });
-    vaultSecrets.delete(value.deploymentName);
-    vaultPersistence.delete(value.deploymentName);
+    await rm(join(app.getPath("userData"), "credentials", `${deploymentName}.opap-secrets`), { force: true });
+    vaultSecrets.delete(deploymentName);
+    vaultPersistence.delete(deploymentName);
     return { status: "removed" };
   } catch (error) { return { status: "failed", errorCode: "REMOVAL_FAILED", detail: safeProcessFailure(error) }; }
   finally { await rm(working, { recursive: true, force: true }); }
+  });
 });
 
 void app.whenReady().then(async () => { await cleanupStaleTemporaryDirectories(); createWindow(); });
