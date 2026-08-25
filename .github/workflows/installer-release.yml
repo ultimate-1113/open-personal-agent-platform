@@ -119,7 +119,12 @@ jobs:
         run: pnpm installer:verify apps/installer/release/SHA256SUMS
       - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
-          subject-checksums: apps/installer/release/SHA256SUMS
+          # subject-checksums misparses LF-only files on Windows runners.
+          # Match only completed root files so unpacked application directories
+          # are never included as attestation subjects.
+          subject-path: |
+            apps/installer/release/*.*
+            apps/installer/release/SHA256SUMS
       - uses: actions/attest-sbom@51e74621a501c89df81fc1391c5a8f4cfc9fab2f # v3
         with:
           subject-path: apps/installer/resources/opap-deployment-bundle.tgz
