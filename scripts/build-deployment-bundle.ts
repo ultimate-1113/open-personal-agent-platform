@@ -5,14 +5,18 @@ import { gzipSync } from "node:zlib";
 
 const root = resolve(import.meta.dirname, "..");
 const output = resolve(root, "apps/installer/resources/opap-deployment-bundle.tgz");
+const profilePaths = ["deployments/profiles/local-dev.json", "deployments/profiles/minimal.json",
+  "deployments/profiles/cloud-base.json", "deployments/profiles/cloud-base-dynamic.json"] as const;
+const profiles = await Promise.all(profilePaths.map(async (path) => JSON.parse(
+  await readFile(resolve(root, path), "utf8"),
+) as { workers: string[] }));
+const workerNames = [...new Set(profiles.flatMap((profile) => profile.workers))].sort();
 const includeRoots = ["migrations", "deployments/profiles", "deployments/targets", "packages/plugin-sdk/static-plugin-registry.json",
   "scripts/opap-setup.ts", "packages/setup-engine/src/index.ts", "packages/secret-vault/src/index.ts",
   "packages/secret-vault/node_modules/hash-wasm",
-  "apps/owner-ui/dist", ...["assistant-worker", "audit-ledger-worker", "conversation-agent",
-    "delegated-agent-api", "delegated-source-gatekeeper", "discord-adapter", "discord-gatekeeper",
-    "github-gatekeeper", "google-gatekeeper", "maintenance-worker", "policy-control-worker",
-    "public-agent-api", "quota-worker"].flatMap((name) => [
+  "apps/owner-ui/dist", ...workerNames.flatMap((name) => [
       `apps/${name}/dist`, `apps/${name}/wrangler.jsonc`, `apps/${name}/package.json`,
+      ...(name === "plugin-runtime-worker" ? [`apps/${name}/Dockerfile`] : []),
     ])];
 
 async function filesAt(path: string): Promise<string[]> {
@@ -45,6 +49,16 @@ function tarEntry(name: string, content: Buffer): Buffer {
 }
 
 const files = (await Promise.all(includeRoots.map(filesAt))).flat().sort((a, b) => a.localeCompare(b));
+const bundledPaths = new Set(files.map((file) => relative(root, file).replaceAll("\\", "/")));
+for (const worker of workerNames) {
+  for (const required of [`apps/${worker}/dist/index.js`, `apps/${worker}/wrangler.jsonc`,
+    `apps/${worker}/package.json`]) {
+    if (!bundledPaths.has(required)) throw new Error(`Deployment bundle is missing ${required}`);
+  }
+}
+if (!bundledPaths.has("apps/plugin-runtime-worker/Dockerfile")) {
+  throw new Error("Deployment bundle is missing the Plugin Runtime Dockerfile");
+}
 const entries: Buffer[] = [];
 const manifest: Array<{ path: string; sha256: string; size: number }> = [];
 for (const file of files) {
