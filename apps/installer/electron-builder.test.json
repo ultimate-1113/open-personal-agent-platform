@@ -39,6 +39,7 @@
     "allowToChangeInstallationDirectory": true
   },
   "linux": {
+    "executableName": "open-personal-agent-setup",
     "target": ["AppImage"],
     "category": "Utility"
   },
