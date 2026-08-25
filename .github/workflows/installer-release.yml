@@ -29,6 +29,21 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - name: Build and verify shared release inputs
+        run: |
+          pnpm installer:bundle
+          pnpm installer:metadata
+          pnpm installer:verify
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: opap-release-inputs
+          if-no-files-found: error
+          path: |
+            apps/installer/resources/opap-deployment-bundle.tgz
+            apps/installer/resources/opap-installer.cdx.json
+            apps/installer/resources/opap-deployment-bundle.cdx.json
+            apps/installer/resources/release.json
+            apps/installer/resources/SHA256SUMS
 
   build:
     name: Build ${{ matrix.name }}
@@ -57,9 +72,12 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm installer:bundle
-      - run: pnpm installer:metadata
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: opap-release-inputs
+          path: apps/installer/resources
       - run: pnpm installer:runtime
+      - run: pnpm --filter @opap/installer build
       - name: Package signed Windows installer
         if: matrix.target == 'win' && env.HAS_WINDOWS_SIGNING == 'true'
         run: |
@@ -97,6 +115,8 @@ jobs:
       - run: pnpm installer:finalize
       - name: Verify embedded release inputs
         run: pnpm installer:verify
+      - name: Verify packaged release artifacts
+        run: pnpm installer:verify apps/installer/release/SHA256SUMS
       - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: apps/installer/release/*
@@ -108,13 +128,7 @@ jobs:
         with:
           name: opap-setup-${{ matrix.name }}
           if-no-files-found: error
-          path: |
-            apps/installer/release/*
-            apps/installer/resources/SHA256SUMS
-            apps/installer/resources/opap-installer.cdx.json
-            apps/installer/resources/release.json
-            verify.ps1
-            verify.sh
+          path: apps/installer/release/*
 
   publish:
     name: Publish GitHub prerelease
@@ -136,12 +150,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          require_one() {
+            local root="$1"
+            local pattern="$2"
+            mapfile -t matches < <(find "$root" -type f -name "$pattern" -print)
+            if [[ "${#matches[@]}" -ne 1 ]]; then
+              printf 'Expected exactly one %s in %s, found %s\n' "$pattern" "$root" "${#matches[@]}" >&2
+              exit 1
+            fi
+            printf '%s' "${matches[0]}"
+          }
           mkdir release-assets
-          cp "$(find downloaded/opap-setup-windows-x64 -type f -name '*Setup Setup*.exe' -print -quit)" release-assets/opap-setup-windows-x64.exe
-          cp "$(find downloaded/opap-setup-linux-x64 -type f -name '*.AppImage' -print -quit)" release-assets/opap-setup-linux-x64.AppImage
-          cp "$(find downloaded/opap-setup-linux-arm64 -type f -name '*.AppImage' -print -quit)" release-assets/opap-setup-linux-arm64.AppImage
+          cp "$(require_one downloaded/opap-setup-windows-x64 '*Setup Setup*.exe')" release-assets/opap-setup-windows-x64.exe
+          cp "$(require_one downloaded/opap-setup-linux-x64 '*.AppImage')" release-assets/opap-setup-linux-x64.AppImage
+          cp "$(require_one downloaded/opap-setup-linux-arm64 '*.AppImage')" release-assets/opap-setup-linux-arm64.AppImage
           for file in opap-deployment-bundle.tgz opap-source.tar.gz opap-installer.cdx.json opap-deployment-bundle.cdx.json provenance.json release.json verify.ps1 verify.sh; do
-            cp "$(find downloaded/opap-setup-windows-x64 -type f -name "$file" -print -quit)" "release-assets/$file"
+            cp "$(require_one downloaded/opap-setup-windows-x64 "$file")" "release-assets/$file"
           done
           cd release-assets
           sha256sum * > SHA256SUMS
