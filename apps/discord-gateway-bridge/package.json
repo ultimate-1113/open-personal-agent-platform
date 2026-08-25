@@ -7,11 +7,12 @@
     "@opap/discord-connector": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3"
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.28.1"
   },
   "scripts": {
     "start": "node --enable-source-maps dist/index.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node24 --sourcemap --outfile=dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }
