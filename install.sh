@@ -31,11 +31,11 @@ if [ -z "$node_major" ] || [ "$node_major" -lt 24 ]; then
   exit 1
 fi
 
-echo "Installing OPAP dependencies with pnpm 11.22.0..."
-corepack pnpm@11.22.0 install --frozen-lockfile --config.confirmModulesPurge=false
+echo "Installing OPAP dependencies with pnpm 11.23.0..."
+corepack pnpm@11.23.0 install --frozen-lockfile --config.confirmModulesPurge=false
 
 if [ "$apply" = "true" ]; then
-  corepack pnpm@11.22.0 opap setup --profile "$profile" --apply
+  corepack pnpm@11.23.0 opap setup --profile "$profile" --apply
 else
-  corepack pnpm@11.22.0 opap setup --profile "$profile"
+  corepack pnpm@11.23.0 opap setup --profile "$profile"
 fi
