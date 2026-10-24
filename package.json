@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.23.0",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.22.1 <25"
   },
   "scripts": {
     "build": "pnpm -r --if-present build",

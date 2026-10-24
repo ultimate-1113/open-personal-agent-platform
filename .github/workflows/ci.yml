@@ -28,7 +28,7 @@ jobs:
       - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
@@ -41,7 +41,7 @@ jobs:
       - uses: pnpm/action-setup@f520eceda224fe1a4aed5a2a27a194379a409996 # v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: "24.22.1"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - uses: docker/setup-qemu-action@v4

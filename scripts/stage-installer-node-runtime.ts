@@ -1,5 +1,8 @@
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { assertInstallerNodeVersion } from "./installer-node-policy.ts";
+
+assertInstallerNodeVersion(process.version);
 
 const output = join(process.cwd(), "apps", "installer", "resources", "node-runtime");
 await mkdir(output, { recursive: true });
