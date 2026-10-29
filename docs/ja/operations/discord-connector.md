@@ -70,7 +70,7 @@ Guild内の応答は既定でephemeralです。
 
 ## Gateway Bridge
 
-`apps/discord-gateway-bridge`はNode.js 24で動作します。
+`apps/discord-gateway-bridge`はNode.js 26 LTSで動作します。
 Bridgeはリンク済みOwnerからBot DMへ届いた本文だけをCloudflareへ転送します。
 Guild Message、Group DM、Attachment、Bot Messageは転送しません。
 Bridgeは外向き通信だけを使うため、Cloudflare TunnelとWorkers VPCは不要です。

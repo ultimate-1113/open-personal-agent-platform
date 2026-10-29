@@ -50,7 +50,7 @@ function Register-WorkerSecret {
   $previousCi = $env:CI
   try {
     $env:CI = "true"
-    $Value | corepack pnpm@10.28.1 exec wrangler secret put $Name --config $Config
+    $Value | pnpm exec wrangler secret put $Name --config $Config
     if ($LASTEXITCODE -ne 0) {
       throw "Wrangler failed to register $Name"
     }

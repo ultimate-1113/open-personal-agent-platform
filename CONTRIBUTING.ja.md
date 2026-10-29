@@ -4,7 +4,7 @@
 
 ## 開発
 
-1. Node.js 24とpnpm 10をInstallします。
+1. Node.js 26 LTS（26.13.0以上27未満）とpnpm 11.23.0をInstallします。
 2. `pnpm install`を実行します。
 3. 変更後に`pnpm check`を実行します。
 4. 公開Packageの動作を変更する場合はChangesetを追加します。

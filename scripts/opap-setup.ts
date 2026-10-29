@@ -123,11 +123,25 @@ if (!action) {
       || workers.includes("plugin-runtime-worker"));
   console.log(`Features: ${enabledFeatures.join(", ")}`);
   console.log("\nPreflight");
+  const commandInvocation = (command: string, commandArgs: readonly string[]): {
+    executable: string; arguments: readonly string[];
+  } => {
+    if (command !== "pnpm") return { executable: command, arguments: commandArgs };
+    const [packageManager, ...arguments_] = commandArgs;
+    if (packageManager !== "pnpm@11.23.0") {
+      throw new Error(`Unsupported package manager invocation: ${packageManager ?? "missing"}`);
+    }
+    if (process.platform === "win32") {
+      return { executable: process.env["ComSpec"] ?? "cmd.exe",
+        arguments: ["/d", "/s", "/c", "pnpm.cmd", ...arguments_] };
+    }
+    return { executable: "pnpm", arguments: arguments_ };
+  };
   const run = (command: string, commandArgs: readonly string[], input?: string) => {
     const stdio = input === undefined ? "inherit" as const
       : ["pipe", "inherit", "inherit"] as ["pipe", "inherit", "inherit"];
     const wranglerIndex = commandArgs.indexOf("wrangler");
-    if (bundleRoot && bundledWrangler && command === "corepack" && wranglerIndex >= 0) {
+    if (bundleRoot && bundledWrangler && command === "pnpm" && wranglerIndex >= 0) {
       const filterIndex = commandArgs.indexOf("--filter");
       const packageName = filterIndex >= 0 ? commandArgs[filterIndex + 1]?.replace(/^@opap\//u, "") : undefined;
       return spawnSync(process.execPath, bundledWranglerArguments(commandArgs.slice(wranglerIndex + 1)), {
@@ -136,17 +150,14 @@ if (!action) {
       });
     }
     if (command === "node") return spawnSync(process.execPath, commandArgs, { stdio, input });
-    const executable = process.platform === "win32" && command === "corepack" ? process.execPath : command;
-    const actualArgs = process.platform === "win32" && command === "corepack"
-      ? [join(dirname(process.execPath), "node_modules", "corepack", "dist", "corepack.js"), ...commandArgs]
-      : commandArgs;
-    return spawnSync(executable, actualArgs, { stdio, input });
+    const invocation = commandInvocation(command, commandArgs);
+    return spawnSync(invocation.executable, invocation.arguments, { stdio, input });
   };
   const capture = (command: string, commandArgs: readonly string[]): string => {
     const options = { encoding: "utf8" as const,
       stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"] };
     const wranglerIndex = commandArgs.indexOf("wrangler");
-    if (bundleRoot && bundledWrangler && command === "corepack" && wranglerIndex >= 0) {
+    if (bundleRoot && bundledWrangler && command === "pnpm" && wranglerIndex >= 0) {
       const filterIndex = commandArgs.indexOf("--filter");
       const packageName = filterIndex >= 0 ? commandArgs[filterIndex + 1]?.replace(/^@opap\//u, "") : undefined;
       const result = spawnSync(process.execPath,
@@ -157,18 +168,15 @@ if (!action) {
       if (result.status !== 0) throw new Error(result.stderr || "Wrangler failed");
       return result.stdout;
     }
-    const executable = process.platform === "win32" && command === "corepack" ? process.execPath : command;
-    const actualArgs = process.platform === "win32" && command === "corepack"
-      ? [join(dirname(process.execPath), "node_modules", "corepack", "dist", "corepack.js"), ...commandArgs]
-      : commandArgs;
-    const result = spawnSync(executable, actualArgs, options);
+    const invocation = commandInvocation(command, commandArgs);
+    const result = spawnSync(invocation.executable, invocation.arguments, options);
     if (result.status !== 0) throw new Error(result.stderr || `${command} failed`);
     return result.stdout;
   };
   const succeeds = (command: string, commandArgs: readonly string[]): boolean => {
     const options = { stdio: "ignore" as const };
     const wranglerIndex = commandArgs.indexOf("wrangler");
-    if (bundleRoot && bundledWrangler && command === "corepack" && wranglerIndex >= 0) {
+    if (bundleRoot && bundledWrangler && command === "pnpm" && wranglerIndex >= 0) {
       const filterIndex = commandArgs.indexOf("--filter");
       const packageName = filterIndex >= 0 ? commandArgs[filterIndex + 1]?.replace(/^@opap\//u, "") : undefined;
       return spawnSync(process.execPath,
@@ -177,22 +185,24 @@ if (!action) {
           env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
         }).status === 0;
     }
-    const executable = process.platform === "win32" && command === "corepack" ? process.execPath : command;
-    const actualArgs = process.platform === "win32" && command === "corepack"
-      ? [join(dirname(process.execPath), "node_modules", "corepack", "dist", "corepack.js"), ...commandArgs]
-      : commandArgs;
-    return spawnSync(executable, actualArgs, options).status === 0;
+    const invocation = commandInvocation(command, commandArgs);
+    return spawnSync(invocation.executable, invocation.arguments, options).status === 0;
   };
   const wranglerJson = (commandArgs: readonly string[]): unknown => {
-    const output = capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", ...commandArgs]);
+    const output = capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", ...commandArgs]);
     const firstObject = Math.min(...[output.indexOf("["), output.indexOf("{")]
       .filter((index) => index >= 0));
     if (!Number.isFinite(firstObject)) throw new Error("Wrangler did not return JSON");
     return JSON.parse(output.slice(firstObject)) as unknown;
   };
   const commands: Array<readonly [string, readonly string[]]> = [["node", ["--version"]]];
-  if (!bundleRoot) commands.push(["corepack", ["pnpm@11.23.0", "--version"]]);
-  commands.push(["corepack", ["pnpm@11.23.0", "exec", "wrangler", "whoami"]]);
+  if (!bundleRoot) {
+    const packageManagerVersion = capture("pnpm", ["pnpm@11.23.0", "--version"]).trim();
+    if (packageManagerVersion !== "11.23.0") {
+      throw new Error(`pnpm 11.23.0 is required; found ${packageManagerVersion}. Run setup with npx --yes pnpm@11.23.0 opap.`);
+    }
+  }
+  commands.push(["pnpm", ["pnpm@11.23.0", "exec", "wrangler", "whoami"]]);
   if (workers.includes("plugin-runtime-worker") && args.has("--apply") &&
     action !== "remove" && action !== "doctor") {
     const dockerVersion = (): string | undefined => {
@@ -245,7 +255,7 @@ if (!action) {
       && resource.deletion === "automatic");
     if (action === "doctor") {
       for (const resource of automatic.filter((item) => item.kind === "worker")) {
-        const result = run("corepack", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "status", "--name", resource.name]);
+        const result = run("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "status", "--name", resource.name]);
         console.log(`${resource.kind} ${resource.name}: ${result.status === 0 ? "ok" : "unavailable"}`);
       }
     } else if (!args.has("--apply")) {
@@ -265,7 +275,7 @@ if (!action) {
         return [value["name"], value["uuid"], value["id"]].filter((item): item is string => typeof item === "string");
       }));
       const r2Output = automatic.some((resource) => resource.kind === "r2")
-        ? capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "r2", "bucket", "list"]) : "";
+        ? capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "r2", "bucket", "list"]) : "";
       const existingR2 = new Set([...r2Output.matchAll(/^name:\s+([^\r\n]+)$/gmu)]
         .map((match) => match[1]!.trim()));
       const containerRows = automatic.some((resource) => resource.kind === "container")
@@ -282,7 +292,7 @@ if (!action) {
       const resourceExists = (resource: ManagedResource): boolean => {
         if (resource.kind === "worker") {
           try {
-            capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "list",
+            capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "list",
               "--name", resource.name, "--json"]);
             return true;
           } catch (error) {
@@ -307,7 +317,7 @@ if (!action) {
           : resource.kind === "d1" ? ["d1", "delete", resource.name, "-y"] : undefined;
         if (!commandArgs) continue;
         try {
-          capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", ...commandArgs]);
+          capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", ...commandArgs]);
         } catch (error) {
           if (error instanceof Error && isAlreadyAbsentCloudflareError(error.message)) {
             console.log(`Already absent: ${resource.kind} ${resource.name}`);
@@ -437,7 +447,7 @@ if (!action) {
     for (const config of configs.values()) {
       if (!config.name) continue;
       try {
-        capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "list",
+        capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "deployments", "list",
           "--name", config.name, "--json"]);
         existingWorkers.add(config.name);
       } catch (error) {
@@ -502,7 +512,7 @@ if (!action) {
         const deployArguments = ["pnpm@11.23.0", "--filter", `@opap/${worker}`,
           "exec", "wrangler", "deploy", "--config", configName];
         if (!retainExistingSecrets) deployArguments.push("--secrets-file", secretsPath);
-        const result = run("corepack", deployArguments);
+        const result = run("pnpm", deployArguments);
         if (result.status !== 0) throw new Error(`Deployment failed: ${worker}`);
         const additionalSecretNames = retainExistingSecrets ? additionalSecretNamesForExistingWorker({ worker,
           dynamicPluginEnabled: enablingDynamicPlugin }) : [];
@@ -514,7 +524,7 @@ if (!action) {
           }));
           await writeFile(secretsPath, `${JSON.stringify(additionalSecrets)}\n`,
             { encoding: "utf8", mode: 0o600 });
-          const secretResult = run("corepack", ["pnpm@11.23.0", "exec", "wrangler", "secret", "bulk",
+          const secretResult = run("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "secret", "bulk",
             secretsPath, "--config", `apps/${worker}/${configName}`]);
           if (secretResult.status !== 0) throw new Error(`Secret registration failed: ${worker}`);
         }
@@ -539,7 +549,7 @@ if (!action) {
     for (const name of requiredDatabases) {
       if (databaseIds.has(name)) continue;
       console.log(`Creating D1 ${name}`);
-      const created = run("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1", "create",
+      const created = run("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "d1", "create",
         name, "--location", "apac"]);
       if (created.status !== 0) throw new Error(`D1 creation failed: ${name}`);
     }
@@ -559,7 +569,7 @@ if (!action) {
       if (!databaseIds.has(name)) throw new Error(`D1 ID not found after provisioning: ${name}`);
     }
 
-    const listedBuckets = capture("corepack",
+    const listedBuckets = capture("pnpm",
       ["pnpm@11.23.0", "exec", "wrangler", "r2", "bucket", "list"]);
     const bucketNames = new Set([...listedBuckets.matchAll(/^name:\s+([^\r\n]+)$/gmu)]
       .map((match) => match[1]!.trim()));
@@ -568,7 +578,7 @@ if (!action) {
     for (const name of requiredBuckets) {
       if (bucketNames.has(name)) continue;
       console.log(`Creating private R2 bucket ${name}`);
-      const created = run("corepack", ["pnpm@11.23.0", "exec", "wrangler", "r2", "bucket",
+      const created = run("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "r2", "bucket",
         "create", name, "--location", "apac", "--storage-class", "Standard"]);
       if (created.status !== 0) throw new Error(`R2 creation failed: ${name}`);
     }
@@ -590,7 +600,7 @@ if (!action) {
       await mkdir(dirname(ledgerPath), { recursive: true });
       await writeFile(ledgerPath, `${JSON.stringify({ apiVersion: "opap.dev/installation-ledger/v1alpha1",
         deploymentName, accountId: request.accountId, environment: deploymentEnvironment, profile: request.profile,
-        platformVersion: "0.1.0-beta.1", createdAt: startedAt, updatedAt: new Date().toISOString(), status,
+        platformVersion: "0.1.0-beta.2", createdAt: startedAt, updatedAt: new Date().toISOString(), status,
         resources: [
           ...[...configs.values()].flatMap((config) => config.name ? [{ provider: "cloudflare", kind: "worker",
             id: config.name, name: config.name, ownership: previousResources.get(`worker:${config.name}`)?.ownership
@@ -656,11 +666,11 @@ if (!action) {
         continue;
       }
       console.log(`Backing up D1 ${name}`);
-      const bookmark = capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1",
+      const bookmark = capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "d1",
         "time-travel", "info", name, "--json"]);
       await writeFile(join(backupDirectory, `${name}.bookmark.json`), bookmark, "utf8");
       try {
-        capture("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1", "export",
+        capture("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "d1", "export",
           name, "--remote", "--skip-confirmation", `--output=${join(backupDirectory, `${name}.sql`)}`]);
       } catch (error) {
         const detail = error instanceof Error ? error.message : "Wrangler failed";
@@ -673,7 +683,7 @@ if (!action) {
       for (const database of config.d1_databases ?? []) {
         if (!database.migrations_dir || migrated.has(database.database_name)) continue;
         console.log(`Applying migrations to ${database.database_name}`);
-        const result = run("corepack", ["pnpm@11.23.0", "exec", "wrangler", "d1", "migrations",
+        const result = run("pnpm", ["pnpm@11.23.0", "exec", "wrangler", "d1", "migrations",
           "apply", database.database_name, "--remote", "--config",
           `apps/${worker}/${generatedConfigName}`]);
         if (result.status !== 0) throw new Error(`Migration failed: ${database.database_name}`);
@@ -683,7 +693,7 @@ if (!action) {
 
     let conversationBootstrap = false;
     if (workers.includes("conversation-agent") && workers.includes("assistant-worker")) {
-      const assistantExists = succeeds("corepack", ["pnpm@11.23.0", "--filter",
+      const assistantExists = succeeds("pnpm", ["pnpm@11.23.0", "--filter",
         "@opap/assistant-worker", "exec", "wrangler", "deployments", "status", "--config",
         generatedConfigName]);
       if (!assistantExists) {
@@ -721,7 +731,7 @@ if (!action) {
         deletion: previousResources.get(`container:${expectedName}`)?.deletion ?? "automatic" }];
     }
     for (const worker of workers) {
-      const result = run("corepack", ["pnpm@11.23.0", "--filter", `@opap/${worker}`,
+      const result = run("pnpm", ["pnpm@11.23.0", "--filter", `@opap/${worker}`,
         "exec", "wrangler", "deployments", "status", "--config", generatedConfigName]);
       if (result.status !== 0) throw new Error(`Deployment status check failed: ${worker}`);
     }

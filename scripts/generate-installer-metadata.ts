@@ -25,7 +25,7 @@ const components = await Promise.all(workspacePackages.sort().map(async (path) =
   return { type: "application", name: value.name, version: value.version, purl: `pkg:npm/${value.name.replace("/", "%2F")}@${value.version}` };
 }));
 const sbom = { bomFormat: "CycloneDX", specVersion: "1.6", serialNumber: "urn:uuid:00000000-0000-4000-8000-000000000001",
-  version: 1, metadata: { component: { type: "application", name: "opap-installer", version: "0.1.0-beta.1" } }, components };
+  version: 1, metadata: { component: { type: "application", name: "opap-installer", version: "0.1.0-beta.2" } }, components };
 await mkdir(resources, { recursive: true });
 const sbomPath = resolve(resources, "opap-installer.cdx.json");
 await writeFile(sbomPath, `${JSON.stringify(sbom, null, 2)}\n`);
@@ -35,7 +35,7 @@ const clean = process.env["GITHUB_SHA"] !== undefined || execFileSync("git", ["s
 const commit = process.env["GITHUB_SHA"] ?? (clean
   ? execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim()
   : "local-working-tree");
-const metadata = { apiVersion: "opap.dev/installer-release/v1alpha1", version: "0.1.0-beta.1", commit,
+const metadata = { apiVersion: "opap.dev/installer-release/v1alpha1", version: "0.1.0-beta.2", commit,
   ...(clean ? { sourceUrl: `https://github.com/ultimate-1113/open-personal-agent-platform/tree/${commit}` } : {}),
   workflowUrl: process.env["GITHUB_SERVER_URL"] && process.env["GITHUB_REPOSITORY"] && process.env["GITHUB_RUN_ID"]
     ? `${process.env["GITHUB_SERVER_URL"]}/${process.env["GITHUB_REPOSITORY"]}/actions/runs/${process.env["GITHUB_RUN_ID"]}` : "local-build",

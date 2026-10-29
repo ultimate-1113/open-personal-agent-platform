@@ -8,18 +8,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 $nodeVersion = (& node --version 2>$null)
-if (-not $nodeVersion -or $nodeVersion -notmatch '^v(\d+)\.') {
-  throw "Node.js 24 LTS or newer is required."
+if (-not $nodeVersion -or $nodeVersion -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+  throw "Node.js 26 LTS (26.13.0 or newer, below 27) is required."
 }
-if ([int]$Matches[1] -lt 24) {
-  throw "Node.js 24 LTS or newer is required. Found $nodeVersion."
+$nodeMajor = [int]$Matches[1]
+$nodeMinor = [int]$Matches[2]
+if ($nodeMajor -ne 26 -or $nodeMinor -lt 13) {
+  throw "Node.js 26 LTS (26.13.0 or newer, below 27) is required. Found $nodeVersion."
 }
 
 Write-Host "Installing OPAP dependencies with pnpm 11.23.0..."
-& corepack pnpm@11.23.0 install --frozen-lockfile --config.confirmModulesPurge=false
+& npx --yes pnpm@11.23.0 install --frozen-lockfile --config.confirmModulesPurge=false
 if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
 
 $setupArguments = @("opap", "setup", "--profile", $Profile)
 if ($Apply) { $setupArguments += "--apply" }
-& corepack pnpm@11.23.0 @setupArguments
+& npx --yes pnpm@11.23.0 @setupArguments
 if ($LASTEXITCODE -ne 0) { throw "OPAP setup failed." }

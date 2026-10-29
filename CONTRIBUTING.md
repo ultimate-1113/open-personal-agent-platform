@@ -4,7 +4,7 @@
 
 ## Development
 
-1. Install Node.js 24 and pnpm 10.
+1. Install Node.js 26 LTS (26.13.0 or newer, below 27) and pnpm 11.23.0.
 2. Run `pnpm install`.
 3. Run `pnpm check` after making changes.
 4. Add a Changeset when public package behavior changes.

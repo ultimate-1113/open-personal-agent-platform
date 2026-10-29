@@ -1,16 +1,15 @@
-FROM --platform=$BUILDPLATFORM node:24.22.1-alpine AS build
+FROM --platform=$BUILDPLATFORM node:26.13.0-alpine AS build
 WORKDIR /workspace
-RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/discord-gateway-bridge/package.json apps/discord-gateway-bridge/package.json
 COPY packages/discord-connector/package.json packages/discord-connector/package.json
-RUN corepack pnpm@11.23.0 install --frozen-lockfile --filter @opap/discord-gateway-bridge... --prod=false
+RUN npx --yes pnpm@11.23.0 install --frozen-lockfile --filter @opap/discord-gateway-bridge... --prod=false
 COPY apps/discord-gateway-bridge/src apps/discord-gateway-bridge/src
 COPY apps/discord-gateway-bridge/tsconfig.json apps/discord-gateway-bridge/tsconfig.json
 COPY packages/discord-connector/src packages/discord-connector/src
-RUN corepack pnpm@11.23.0 --filter @opap/discord-gateway-bridge build
+RUN npx --yes pnpm@11.23.0 --filter @opap/discord-gateway-bridge build
 
-FROM node:24.22.1-alpine
+FROM node:26.13.0-alpine
 RUN addgroup -S opap && adduser -S -G opap -h /app opap
 WORKDIR /app
 COPY --from=build --chown=opap:opap /workspace/apps/discord-gateway-bridge/dist ./dist

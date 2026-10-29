@@ -8,3 +8,8 @@ allowBuilds:
   electron-winstaller: true
   esbuild: true
   workerd: true
+
+# Node 26 types are an intentional runtime-baseline update; keep the exception
+# exact so the minimum-release-age policy remains active for every other package.
+minimumReleaseAgeExclude:
+  - '@types/node@26.6.6'

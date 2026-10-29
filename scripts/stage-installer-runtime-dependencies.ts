@@ -32,9 +32,9 @@ await writeFile(join(destination, "package.json"), `${JSON.stringify({
   dependencies: { wrangler: wranglerVersion },
 }, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
 
-const executable = process.platform === "win32" ? process.env["ComSpec"] ?? "cmd.exe" : "corepack";
-const packageManagerPrefix = process.platform === "win32" ? ["/d", "/s", "/c", "corepack.cmd"] : [];
-const result = spawnSync(executable, [...packageManagerPrefix, repositoryManifest.packageManager, "install", "--dir", destination, "--prod", "--ignore-workspace",
+const executable = process.platform === "win32" ? process.env["ComSpec"] ?? "cmd.exe" : "npx";
+const packageManagerPrefix = process.platform === "win32" ? ["/d", "/s", "/c", "npx.cmd"] : [];
+const result = spawnSync(executable, [...packageManagerPrefix, "--yes", repositoryManifest.packageManager, "install", "--dir", destination, "--prod", "--ignore-workspace",
   "--ignore-scripts", "--lockfile=false", "--config.package-import-method=copy", "--config.node-linker=hoisted"], {
   cwd: repositoryRoot,
   stdio: "inherit",

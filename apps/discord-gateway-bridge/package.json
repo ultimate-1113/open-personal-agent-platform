@@ -1,18 +1,18 @@
 {
   "name": "@opap/discord-gateway-bridge",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "private": true,
   "type": "module",
   "dependencies": {
     "@opap/discord-connector": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
+    "@types/node": "^26.6.6",
     "esbuild": "^0.28.1"
   },
   "scripts": {
     "start": "node --enable-source-maps dist/index.js",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node24 --sourcemap --outfile=dist/index.js",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node26 --sourcemap --outfile=dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

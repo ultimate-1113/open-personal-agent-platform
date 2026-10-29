@@ -11,7 +11,8 @@ export type EncryptedSecretFile = {
 };
 
 const base64url = (value: Uint8Array): string => Buffer.from(value).toString("base64url");
-const bytes = (value: string): Uint8Array => new Uint8Array(Buffer.from(value, "base64url"));
+const ownedBytes = (value: Uint8Array<ArrayBufferLike>): Uint8Array<ArrayBuffer> => Uint8Array.from(value);
+const bytes = (value: string): Uint8Array<ArrayBuffer> => ownedBytes(Buffer.from(value, "base64url"));
 
 export function generatePlatformSecrets(): Record<string, string> {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -30,14 +31,14 @@ export function generatePlatformSecrets(): Record<string, string> {
 
 export async function encryptSecrets(secrets: Record<string, string>, passphrase: string): Promise<EncryptedSecretFile> {
   if (passphrase.length < 12) throw new Error("Recovery passphrase must be at least 12 characters");
-  const salt = randomBytes(16);
-  const nonce = randomBytes(12);
+  const salt = ownedBytes(randomBytes(16));
+  const nonce = ownedBytes(randomBytes(12));
   const iterations = 3;
   const memorySize = 65_536;
   const parallelism = 1;
   const derived = await argon2id({ password: passphrase, salt, iterations, memorySize,
     parallelism, hashLength: 32, outputType: "binary" });
-  const key = await webcrypto.subtle.importKey("raw", derived, "AES-GCM", false, ["encrypt"]);
+  const key = await webcrypto.subtle.importKey("raw", ownedBytes(derived), "AES-GCM", false, ["encrypt"]);
   const ciphertext = await webcrypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key,
     encoder.encode(JSON.stringify(secrets)));
   return { apiVersion: "opap.dev/encrypted-secrets/v1alpha1",
@@ -49,7 +50,7 @@ export async function decryptSecrets(file: EncryptedSecretFile, passphrase: stri
   const derived = await argon2id({ password: passphrase, salt: bytes(file.kdf.salt),
     iterations: file.kdf.iterations, memorySize: file.kdf.memorySize,
     parallelism: file.kdf.parallelism, hashLength: 32, outputType: "binary" });
-  const key = await webcrypto.subtle.importKey("raw", derived, "AES-GCM", false, ["decrypt"]);
+  const key = await webcrypto.subtle.importKey("raw", ownedBytes(derived), "AES-GCM", false, ["decrypt"]);
   const plaintext = await webcrypto.subtle.decrypt({ name: "AES-GCM", iv: bytes(file.cipher.nonce) },
     key, bytes(file.cipher.ciphertext));
   const value: unknown = JSON.parse(decoder.decode(plaintext));

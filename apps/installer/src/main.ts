@@ -19,7 +19,7 @@ type ReleaseMetadata = { version: string; commit: string; workflowUrl: string; s
   lockSha256?: string; bundleSha256?: string; sbomSha256?: string;
   codeSigning?: { platform: string; signed: boolean; notarized: boolean } };
 const localRelease: ReleaseMetadata = {
-  version: process.env["OPAP_RELEASE_VERSION"] ?? "0.1.0-beta.1",
+  version: process.env["OPAP_RELEASE_VERSION"] ?? "0.1.0-beta.2",
   commit: process.env["OPAP_GIT_COMMIT"] ?? "local-working-tree",
   workflowUrl: process.env["OPAP_BUILD_WORKFLOW_URL"] ?? "local-build",
 };

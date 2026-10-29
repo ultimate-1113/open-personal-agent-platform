@@ -67,7 +67,7 @@ Ownerデータは送信先が明示的に許可された場合だけCloud Provid
 
 ## 開発
 
-Node.js 24とpnpm 11が必要です。
+Node.js 26 LTS（26.13.0以上27未満）とpnpm 11.23.0が必要です。
 
 ```bash
 pnpm install --frozen-lockfile

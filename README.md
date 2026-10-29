@@ -67,7 +67,7 @@ Owner data is sent to a cloud provider only when the destination is explicitly p
 
 ## Development
 
-Node.js 24 and pnpm 11 are required.
+Node.js 26 LTS (26.13.0 or newer, below 27) and pnpm 11.23.0 are required.
 
 ```bash
 pnpm install --frozen-lockfile

@@ -1,6 +1,6 @@
 # Phase 5の運用とPlugin
 
-依存関係は2026年8月20日時点で更新しています。現行の安定版`typescript-eslint`はTypeScript 6.1未満を対応範囲としているため、TypeScript 7ではなく対応範囲内の最新5.xを固定しています。`@types/node`も、未採用のNode最新版ではなく、最低実行環境であるNode.js 24 LTSに合わせています。
+一般の依存関係は2026年8月20日時点で更新しています。実行環境の基準は2026年10月29日にNode.js 26.13.0 LTSへ更新し、`@types/node`もNode.js 26系へ合わせました。このベータで採用している安定版`typescript-eslint`はTypeScript 6.1未満を対応範囲としているため、TypeScriptは対応範囲内の5.x系を維持します。
 
 ## 安定性の区分
 

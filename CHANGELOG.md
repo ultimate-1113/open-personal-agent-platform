@@ -2,6 +2,12 @@
 
 All notable changes to Open Personal Agent Platform are documented here.
 
+## Unreleased
+
+### Changed
+
+- Raised the supported runtime baseline to Node.js 26.13.0 LTS, updated Node declarations and the Discord Gateway Bridge container, and removed reliance on the Corepack binary formerly bundled with Node.js.
+
 ## [0.1.0-beta.1] - 2026-08-20
 
 ### Added

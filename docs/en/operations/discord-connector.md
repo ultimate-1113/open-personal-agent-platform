@@ -70,7 +70,7 @@ Automatic notifications expose only a Review button, followed by an ephemeral ap
 
 ## Gateway Bridge
 
-`apps/discord-gateway-bridge` runs on Node.js 24.
+`apps/discord-gateway-bridge` runs on Node.js 26 LTS.
 It forwards only normal bot direct messages from the linked owner.
 It excludes Guild Messages, Group DMs, attachments, and bot messages.
 It uses outbound traffic only and requires neither Cloudflare Tunnel nor Workers VPC.

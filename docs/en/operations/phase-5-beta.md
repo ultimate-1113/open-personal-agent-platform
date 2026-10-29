@@ -1,6 +1,6 @@
 # Phase 5 beta operations
 
-Dependencies were refreshed on 2026-08-20. TypeScript 7 is not used because the current stable `typescript-eslint` declares support below TypeScript 6.1; the workspace therefore pins the newest supported TypeScript 5.x release. `@types/node` follows the supported Node.js 24 LTS runtime rather than the unrelated newest Node major.
+General dependencies were refreshed on 2026-08-20. The runtime baseline was refreshed on 2026-10-29 to Node.js 26.13.0 LTS, with `@types/node` on the Node.js 26 line. TypeScript 7 is not used because the stable `typescript-eslint` version selected for this beta declares support below TypeScript 6.1; the workspace therefore remains on the supported TypeScript 5.x line.
 
 ## Stability boundaries
 

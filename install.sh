@@ -25,17 +25,24 @@ case "$profile" in
   *) echo "Unknown profile: $profile" >&2; exit 2 ;;
 esac
 
-node_major="$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')"
-if [ -z "$node_major" ] || [ "$node_major" -lt 24 ]; then
-  echo "Node.js 24 LTS or newer is required." >&2
+node_version="$(node --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\1 \2 \3/p')"
+if [ -z "$node_version" ]; then
+  echo "Node.js 26 LTS (26.13.0 or newer, below 27) is required." >&2
+  exit 1
+fi
+set -- $node_version
+node_major="$1"
+node_minor="$2"
+if [ "$node_major" -ne 26 ] || [ "$node_minor" -lt 13 ]; then
+  echo "Node.js 26 LTS (26.13.0 or newer, below 27) is required." >&2
   exit 1
 fi
 
 echo "Installing OPAP dependencies with pnpm 11.23.0..."
-corepack pnpm@11.23.0 install --frozen-lockfile --config.confirmModulesPurge=false
+npx --yes pnpm@11.23.0 install --frozen-lockfile --config.confirmModulesPurge=false
 
 if [ "$apply" = "true" ]; then
-  corepack pnpm@11.23.0 opap setup --profile "$profile" --apply
+  npx --yes pnpm@11.23.0 opap setup --profile "$profile" --apply
 else
-  corepack pnpm@11.23.0 opap setup --profile "$profile"
+  npx --yes pnpm@11.23.0 opap setup --profile "$profile"
 fi
